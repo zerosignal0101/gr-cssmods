@@ -17,6 +17,17 @@
 namespace gr {
 namespace cssmods {
 
+// Helper function to generate a LoRa-like chirp symbol
+std::vector<std::complex<float>> generate_lora_chirp(
+    bool is_up,
+    int sf,
+    double bw,
+    double fs,
+    double h_in, // Use h_in to differentiate from rounded h
+    double cfo,
+    double tdelta = 0.0,
+    double tscale = 1.0);
+
 class css_modulate_impl : public css_modulate
 {
 private:
@@ -30,16 +41,6 @@ private:
     size_t d_chirp_len; // Number of samples per chirp
     size_t d_sfd_len;   // Number of samples in the short SFD part (chirp_len/4)
     size_t d_header_len; // Total length of preamble, netid, sfd
-    // Helper function to generate a LoRa-like chirp symbol
-    std::vector<std::complex<float>> generate_lora_chirp(
-        bool is_up,
-        int sf,
-        double bw,
-        double fs,
-        double h,
-        double cfo,
-        double tdelta = 0.0,
-        double tscale = 1.0);
 
 public:
     css_modulate_impl(int sf, double bw, double fs, int cr, int preamble_len, double cfo);

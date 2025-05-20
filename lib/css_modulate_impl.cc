@@ -32,8 +32,8 @@ std::vector<std::complex<float>> generate_lora_chirp(
     double fs,
     double h_in, // Use h_in to differentiate from rounded h
     double cfo,
-    double tdelta = 0.0,
-    double tscale = 1.0)
+    double tdelta,
+    double tscale)
 {
     // Validate inputs (simple checks)
     if (sf <= 0 || bw <= 0 || fs <= 0) {
@@ -186,10 +186,8 @@ int css_modulate_impl::general_work(int noutput_items,
     const int* in = reinterpret_cast<const int*>(input_items[0]);
     std::complex<float>* out = reinterpret_cast<std::complex<float>*>(output_items[0]);
 
-    // --- 逻辑核心调整 ---
-    // 旧版：total_out_samples_to_write = d_header_len + ninput_items * d_chirp_len
-    // 新版：根据 noutput_items 反推能处理的输入项数
     int max_possible_input_items = 0;
+    if (input_items.size() < 1 || output_items.size() < 1) return 0;
     if (noutput_items > d_header_len) {
         max_possible_input_items = (noutput_items - d_header_len) / d_chirp_len;
     }
