@@ -14,7 +14,7 @@
 /* BINDTOOL_GEN_AUTOMATIC(0)                                                       */
 /* BINDTOOL_USE_PYGCCXML(0)                                                        */
 /* BINDTOOL_HEADER_FILE(css_modulate.h)                                        */
-/* BINDTOOL_HEADER_FILE_HASH(9382eb307be4da1f1d117012ebe1fdb3)                     */
+/* BINDTOOL_HEADER_FILE_HASH(7485d90c782a4d64069f6794d2532e00)                     */
 /***********************************************************************************/
 
 #include <pybind11/complex.h>
@@ -30,30 +30,21 @@ namespace py = pybind11;
 void bind_css_modulate(py::module& m)
 {
 
-    using css_modulate    = gr::cssmods::css_modulate;
+    using css_modulate = ::gr::cssmods::css_modulate;
 
 
-    py::class_<css_modulate, gr::block, gr::basic_block,
-        std::shared_ptr<css_modulate>>(m, "css_modulate", D(css_modulate))
+    py::class_<css_modulate, gr::block, gr::basic_block, std::shared_ptr<css_modulate>>(
+        m, "css_modulate", D(css_modulate))
 
         .def(py::init(&css_modulate::make),
-           D(css_modulate,make)
-        )
-        
-
+             py::arg("sf"),
+             py::arg("bw"),
+             py::arg("fs"),
+             py::arg("cr"),
+             py::arg("preamble_len"),
+             py::arg("cfo"),
+             D(css_modulate, make))
 
 
         ;
-
-
-
-
 }
-
-
-
-
-
-
-
-

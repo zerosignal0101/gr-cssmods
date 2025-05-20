@@ -32,7 +32,7 @@ public:
      * class. cssmods::css_modulate::make is the public interface for
      * creating new instances.
      */
-    static sptr make(int sf, double bw, double fs, double h, double tdelta = 0.0);
+    static sptr make(int sf, double bw, double fs, int cr, int preamble_len, double cfo);
 };
 
 } // namespace cssmods

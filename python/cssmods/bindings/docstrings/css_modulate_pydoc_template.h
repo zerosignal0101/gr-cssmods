@@ -15,13 +15,10 @@
  */
 
 
-
- static const char *__doc_gr_cssmods_css_modulate = R"doc()doc";
-
-
- static const char *__doc_gr_cssmods_css_modulate_css_modulate = R"doc()doc";
+static const char* __doc_gr_cssmods_css_modulate = R"doc()doc";
 
 
- static const char *__doc_gr_cssmods_css_modulate_make = R"doc()doc";
+static const char* __doc_gr_cssmods_css_modulate_css_modulate = R"doc()doc";
 
-  
+
+static const char* __doc_gr_cssmods_css_modulate_make = R"doc()doc";

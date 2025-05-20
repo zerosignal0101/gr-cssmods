@@ -11,6 +11,7 @@
 #include <gnuradio/cssmods/css_modulate.h>
 #include <vector>
 #include <complex>
+#include <algorithm> // For std::min
 
 
 namespace gr {
@@ -19,6 +20,16 @@ namespace cssmods {
 class css_modulate_impl : public css_modulate
 {
 private:
+    int d_sf;             // spreading factor
+    double d_bw;          // bandwidth
+    double d_fs;          // sampling frequency
+    int d_cr;             // code rate (not used in modulate func but good to store)
+    int d_preamble_len;   // preamble length
+    double d_cfo;         // carrier frequency offset
+    // Calculated values based on parameters
+    size_t d_chirp_len; // Number of samples per chirp
+    size_t d_sfd_len;   // Number of samples in the short SFD part (chirp_len/4)
+    size_t d_header_len; // Total length of preamble, netid, sfd
     // Helper function to generate a LoRa-like chirp symbol
     std::vector<std::complex<float>> generate_lora_chirp(
         bool is_up,
@@ -31,7 +42,7 @@ private:
         double tscale = 1.0);
 
 public:
-    css_modulate_impl(int sf, double bw, double fs, double h, double tdelta);
+    css_modulate_impl(int sf, double bw, double fs, int cr, int preamble_len, double cfo);
     ~css_modulate_impl();
 
     // Where all the action really happens
