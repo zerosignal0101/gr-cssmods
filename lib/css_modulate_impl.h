@@ -9,6 +9,9 @@
 #define INCLUDED_CSSMODS_CSS_MODULATE_IMPL_H
 
 #include <gnuradio/cssmods/css_modulate.h>
+#include <vector>
+#include <complex>
+
 
 namespace gr {
 namespace cssmods {
@@ -16,7 +19,16 @@ namespace cssmods {
 class css_modulate_impl : public css_modulate
 {
 private:
-    // Nothing to declare in this block.
+    // Helper function to generate a LoRa-like chirp symbol
+    std::vector<std::complex<float>> generate_lora_chirp(
+        bool is_up,
+        int sf,
+        double bw,
+        double fs,
+        double h,
+        double cfo,
+        double tdelta = 0.0,
+        double tscale = 1.0);
 
 public:
     css_modulate_impl(int sf, double bw, double fs, double h, double tdelta);
