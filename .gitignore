@@ -1,0 +1,8 @@
+# IDE
+.vscode/
+
+# Projects
+*~
+*.pyc
+*.pyo
+build*/
