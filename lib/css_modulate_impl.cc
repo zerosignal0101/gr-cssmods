@@ -117,14 +117,23 @@ std::vector<std::complex<float>> generate_lora_chirp(
 css_modulate_impl::css_modulate_impl(
     int sf, double bw, double fs, int cr, int preamble_len, double cfo)
     : gr::block("css_modulate",
-                gr::io_signature::make(1, 1, sizeof(int)), // Input: symbols (integers)
-              gr::io_signature::make(1, 1, sizeof(std::complex<float>))), // Output: complex samples
+                gr::io_signature::make(0, 0, 0), // No streaming input
+                gr::io_signature::make(1, 1, sizeof(std::complex<float>))), // Output: complex samples
+      d_debug(true),
       d_sf(sf),
       d_bw(bw),
       d_fs(fs),
       d_cr(cr), // Not used in modulate but stored
       d_preamble_len(preamble_len),
-      d_cfo(cfo)
+      d_cfo(cfo),
+      d_pdu_queue(),
+      d_current_pdu(),
+      d_pdu_offset(0),
+      d_last_time(std::chrono::steady_clock::now()),
+      d_items_per_second(fs),
+      d_items_per_us(fs / 1e6),
+      d_upchirp(),
+      d_downchirp()
 {
     // Validate parameters if necessary
     if (sf < 7 || sf > 12) throw std::runtime_error("LoRa SF must be between 7 and 12");
@@ -145,10 +154,60 @@ css_modulate_impl::css_modulate_impl(
     d_header_len = d_preamble_len * d_chirp_len + // Preamble
                    2 * d_chirp_len +             // NetID (2 chirps)
                    2 * d_chirp_len + d_sfd_len;  // SFD (2 full DC + 1 partial DC)
-    // Optional: Register ports for messages/control signals if needed
-    // message_port_register_in(pmt::mp("msg_in"));
-    // message_port_register_out(pmt::mp("msg_out"));
+    // PDU input
+    message_port_register_in(pmt::mp("pdu"));
+    set_msg_handler(pmt::mp("pdu"), [this](pmt::pmt_t msg) {
+        this->handle_pdu(msg);
+    });
+    if (d_debug == true) {
+        std::cout << "CSS modulated block initialized with:" << std::endl;
+        std::cout << "  Sample rate: " << d_fs << " samples/sec" << std::endl;
+    }
+    // Pre calculate chirp
+    // chirp (uc 和 dc)
+    std::vector<std::complex<float>> uc = generate_lora_chirp(true, d_sf, d_bw, d_fs, 0, d_cfo);
+    std::vector<std::complex<float>> dc = generate_lora_chirp(false, d_sf, d_bw, d_fs, 0, d_cfo);
+    if (uc.size() != d_chirp_len || dc.size() != d_chirp_len) {
+        throw std::runtime_error("Can not generate chirp for modulation!");
+    }
+    d_upchirp = uc;
+    d_downchirp = dc;
 }
+
+/*
+ * PDU input handler.
+ */
+
+void css_modulate_impl::handle_pdu(pmt::pmt_t msg) {
+    gr::thread::scoped_lock guard(d_mutex);
+    
+    // Check if this is a valid PDU
+    if (!pmt::is_pair(msg)) {
+        std::cerr << "Received invalid PDU (not a pair)" << std::endl;
+        return;
+    }
+    
+    pmt::pmt_t metadata = pmt::car(msg);
+    pmt::pmt_t vector = pmt::cdr(msg);
+    
+    if (!pmt::is_u8vector(vector)) {
+        std::cerr << "Received invalid PDU (data not u8vector)" << std::endl;
+        return;
+    }
+    
+    size_t pdu_len = pmt::length(vector);
+    const uint8_t* pdu_data = (const uint8_t*)pmt::uniform_vector_elements(vector, pdu_len);
+    
+    // Copy the PDU data to our queue
+    std::vector<uint8_t> new_pdu(pdu_data, pdu_data + pdu_len);
+    d_pdu_queue.push_back(new_pdu);
+    
+    if (d_debug = true) {
+        std::cout << "Received new PDU with length " << pdu_len << " bytes" << std::endl;
+        std::cout << "Current PDU queue size: " << d_pdu_queue.size() << std::endl;
+    }
+}
+
 
 /*
  * Our virtual destructor.
@@ -160,20 +219,7 @@ css_modulate_impl::~css_modulate_impl()
 
 void css_modulate_impl::forecast(int noutput_items, gr_vector_int& ninput_items_required)
 {
-    // Calculate how many input items are needed to produce noutput_items
-    // Formula derived from: noutput_items = d_header_len + ninput_items * d_chirp_len
-    // So: ninput_items = (noutput_items - d_header_len) / d_chirp_len
-
-    // Ensure we have space for at least the header
-    if (noutput_items <= d_header_len) {
-        // If output is less than header length, no symbols are needed (just header)
-        ninput_items_required[0] = 0;
-    } else {
-        // Calculate required input items, rounding up to ensure we have enough
-        ninput_items_required[0] = static_cast<int>(
-            std::ceil(static_cast<float>(noutput_items - d_header_len) / d_chirp_len)
-        );
-    }
+    // No stream input added
 }
 
 
@@ -182,73 +228,116 @@ int css_modulate_impl::general_work(int noutput_items,
                                     gr_vector_const_void_star& input_items,
                                     gr_vector_void_star& output_items)
 {
-    // Get pointers to input and output buffers (with type casting)
-    const int* in = reinterpret_cast<const int*>(input_items[0]);
+    gr::thread::scoped_lock guard(d_mutex);
     std::complex<float>* out = reinterpret_cast<std::complex<float>*>(output_items[0]);
+    
+    // Calculate how many items we should produce based on time elapsed
+    auto now = std::chrono::steady_clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(now - d_last_time);
+    double elapsed_seconds = elapsed.count() / 1e6;
+    int target_items = static_cast<int>(std::round(elapsed_seconds * d_fs));
 
-    int max_possible_input_items = 0;
-    if (input_items.size() < 1 || output_items.size() < 1) return 0;
-    if (noutput_items > d_header_len) {
-        max_possible_input_items = (noutput_items - d_header_len) / d_chirp_len;
+    // Limit to the requested noutput_items
+    int items_to_produce = std::min(target_items, noutput_items);
+    if (items_to_produce <= 0) {
+        return 0; // Not enough time has passed to produce any items
     }
 
-    // 实际处理的输入项数不能超过可用的输入项数
-    int actual_input_items = std::min(max_possible_input_items, ninput_items[0]);
-
-    // 如果输出空间不足（actual_input_items == 0），返回 0 等待下次调用
-    if (actual_input_items <= 0) {
-        return 0;
+    // Debug print
+    if (d_debug == true) {
+        std::cout << "Work called: noutput_items=" << noutput_items 
+                << ", target_items=" << target_items
+                << ", producing=" << items_to_produce << std::endl;
     }
 
-    // 实际输出的总长度（需 <= noutput_items）
-    size_t total_out_samples_to_write = d_header_len + actual_input_items * d_chirp_len;
-
-    // --- MATLAB 逻辑翻译（保持不变）---
-    // 1. 生成基 chirp (uc 和 dc)
-    std::vector<std::complex<float>> uc = generate_lora_chirp(true, d_sf, d_bw, d_fs, 0, d_cfo);
-    std::vector<std::complex<float>> dc = generate_lora_chirp(false, d_sf, d_bw, d_fs, 0, d_cfo);
-    if (uc.size() != d_chirp_len || dc.size() != d_chirp_len) {
-        return 0; // 错误处理
-    }
-
-    size_t current_out_offset = 0;
-    // 2. 添加前导码 (preamble_len * uc)
-    for (int i = 0; i < d_preamble_len; ++i) {
-        std::memcpy(out + current_out_offset, uc.data(), d_chirp_len * sizeof(std::complex<float>));
-        current_out_offset += d_chirp_len;
-    }
-
-    // 3. 添加 NetID (uc_24, uc_32)
-    std::vector<std::complex<float>> netid1_chirp = generate_lora_chirp(true, d_sf, d_bw, d_fs, 24, d_cfo);
-    std::vector<std::complex<float>> netid2_chirp = generate_lora_chirp(true, d_sf, d_bw, d_fs, 32, d_cfo);
-    std::memcpy(out + current_out_offset, netid1_chirp.data(), d_chirp_len * sizeof(std::complex<float>));
-    current_out_offset += d_chirp_len;
-    std::memcpy(out + current_out_offset, netid2_chirp.data(), d_chirp_len * sizeof(std::complex<float>));
-    current_out_offset += d_chirp_len;
-
-    // 4. 添加 SFD (dc, dc, dc[1:chirp_len/4])
-    std::memcpy(out + current_out_offset, dc.data(), d_chirp_len * sizeof(std::complex<float>));
-    current_out_offset += d_chirp_len;
-    std::memcpy(out + current_out_offset, dc.data(), d_chirp_len * sizeof(std::complex<float>));
-    current_out_offset += d_chirp_len;
-    std::memcpy(out + current_out_offset, dc.data(), d_sfd_len * sizeof(std::complex<float>));
-    current_out_offset += d_sfd_len;
-
-    // 5. 添加数据符号（仅处理 actual_input_items 个）
-    for (int i = 0; i < actual_input_items; ++i) {
-        int symbol = in[i];
-        std::vector<std::complex<float>> data_chirp = generate_lora_chirp(true, d_sf, d_bw, d_fs, symbol, d_cfo);
-        if (data_chirp.size() != d_chirp_len) {
-            return 0;
+    int produced = 0;
+    while (produced < items_to_produce) {
+        // Check if we need to start a new PDU
+        if (!d_current_pdu.empty() && d_pdu_offset >= d_current_pdu.size()) {
+            if (d_debug == true) {
+                std::cout << "Finished processing current PDU (length=" 
+                        << d_current_pdu.size() << ")" << std::endl;
+            }
+            d_current_pdu.clear();
+            d_pdu_offset = 0;
         }
-        std::memcpy(out + current_out_offset, data_chirp.data(), d_chirp_len * sizeof(std::complex<float>));
-        current_out_offset += d_chirp_len;
+
+        if (d_current_pdu.empty() && !d_pdu_queue.empty()) {
+            if ((items_to_produce - produced) < d_header_len) {
+                if (d_debug == false) {
+                    std::cout << "Can not find enough space to write header, waiting for next try." << std::endl;
+                }
+                break;
+            }
+            d_current_pdu = d_pdu_queue.front();
+            d_pdu_queue.pop_front();
+            d_pdu_offset = 0;
+
+            // 2. 添加前导码 (preamble_len * uc)
+            for (int i = 0; i < d_preamble_len; ++i) {
+                std::memcpy(out + produced, d_upchirp.data(), d_chirp_len * sizeof(std::complex<float>));
+                produced += d_chirp_len;
+            }
+
+            // 3. 添加 NetID (uc_24, uc_32)
+            std::vector<std::complex<float>> netid1_chirp = generate_lora_chirp(true, d_sf, d_bw, d_fs, 24, d_cfo);
+            std::vector<std::complex<float>> netid2_chirp = generate_lora_chirp(true, d_sf, d_bw, d_fs, 32, d_cfo);
+            std::memcpy(out + produced, netid1_chirp.data(), d_chirp_len * sizeof(std::complex<float>));
+            produced += d_chirp_len;
+            std::memcpy(out + produced, netid2_chirp.data(), d_chirp_len * sizeof(std::complex<float>));
+            produced += d_chirp_len;
+
+            // 4. 添加 SFD (dc, dc, dc[1:chirp_len/4])
+            std::memcpy(out + produced, d_downchirp.data(), d_chirp_len * sizeof(std::complex<float>));
+            produced += d_chirp_len;
+            std::memcpy(out + produced, d_downchirp.data(), d_chirp_len * sizeof(std::complex<float>));
+            produced += d_chirp_len;
+            std::memcpy(out + produced, d_downchirp.data(), d_sfd_len * sizeof(std::complex<float>));
+            produced += d_sfd_len;
+            
+            if (d_debug == true) {
+                std::cout << "Starting new PDU (length=" << d_current_pdu.size() 
+                            << "), queue size now=" << d_pdu_queue.size() << std::endl;
+            }
+        }
+
+        // Determine how many items we can produce in this iteration
+        int remaining_request = (items_to_produce - produced) / d_chirp_len;
+        int remaining_pdu = d_current_pdu.empty() ? 0 : (d_current_pdu.size() - d_pdu_offset);
+        int chunk_size = std::min(remaining_request, remaining_pdu);
+
+        size_t total_out_samples_to_write = chunk_size * d_chirp_len;
+
+        if (chunk_size > 0) {
+            // 5. 添加数据符号（仅处理 chunk_size 个）
+            for (int i = 0; i < chunk_size; ++i) {
+                int symbol = d_current_pdu[d_pdu_offset + i];
+                std::vector<std::complex<float>> data_chirp = generate_lora_chirp(true, d_sf, d_bw, d_fs, symbol, d_cfo);
+                if (data_chirp.size() != d_chirp_len) {
+                    return 0;
+                }
+                std::memcpy(out + produced, data_chirp.data(), d_chirp_len * sizeof(std::complex<float>));
+                produced += d_chirp_len;
+            }
+        } else {
+            // No PDU data available - insert zero padding
+            int padding_size = (items_to_produce - produced);
+            for (int i = 0; i < padding_size; i++) {
+                out[produced + i] = static_cast<uint8_t>(0);
+            }
+            produced += padding_size;
+            if (d_debug == true) {
+                std::cout << "Inserted " << padding_size << " bytes of zero padding" << std::endl;
+            }
+        }
     }
 
-    // --- 结束逻辑翻译 ---
-    // 消耗输入项并返回生成的输出项数
-    consume_each(actual_input_items);
-    return total_out_samples_to_write;
+    // Update timing
+    d_last_time = now;
+    if (d_debug == true) {
+        std::cout << "Produced " << produced << " items in this work call" << std::endl;
+    }
+    return produced;
 }
 
 

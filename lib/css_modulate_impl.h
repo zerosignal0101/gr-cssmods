@@ -31,6 +31,8 @@ std::vector<std::complex<float>> generate_lora_chirp(
 class css_modulate_impl : public css_modulate
 {
 private:
+    bool d_debug;         // Debug flag
+
     int d_sf;             // spreading factor
     double d_bw;          // bandwidth
     double d_fs;          // sampling frequency
@@ -41,6 +43,22 @@ private:
     size_t d_chirp_len; // Number of samples per chirp
     size_t d_sfd_len;   // Number of samples in the short SFD part (chirp_len/4)
     size_t d_header_len; // Total length of preamble, netid, sfd
+
+    // PDU
+    std::deque<std::vector<uint8_t>> d_pdu_queue;
+    std::vector<uint8_t> d_current_pdu;
+    size_t d_pdu_offset;
+    gr::thread::mutex d_mutex;
+    void handle_pdu(pmt::pmt_t msg);
+
+    // Constant time control
+    std::chrono::time_point<std::chrono::steady_clock> d_last_time;
+    double d_items_per_second;
+    double d_items_per_us;
+
+    // Pre calculated chirp
+    std::vector<std::complex<float>> d_upchirp;
+    std::vector<std::complex<float>> d_downchirp;
 
 public:
     css_modulate_impl(int sf, double bw, double fs, int cr, int preamble_len, double cfo);

@@ -13,6 +13,7 @@ include(GrPlatform) #define LIB_SUFFIX
 
 list(APPEND cssmods_sources
     css_modulate_impl.cc
+    css_symbols_impl.cc
 )
 
 set(cssmods_sources "${cssmods_sources}" PARENT_SCOPE)

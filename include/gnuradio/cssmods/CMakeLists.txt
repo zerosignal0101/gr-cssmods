@@ -11,5 +11,6 @@
 ########################################################################
 install(FILES
     api.h
-    css_modulate.h DESTINATION include/gnuradio/cssmods
+    css_modulate.h
+    css_symbols.h DESTINATION include/gnuradio/cssmods
 )
