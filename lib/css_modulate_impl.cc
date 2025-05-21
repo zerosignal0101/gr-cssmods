@@ -119,7 +119,7 @@ css_modulate_impl::css_modulate_impl(
     : gr::block("css_modulate",
                 gr::io_signature::make(0, 0, 0), // No streaming input
                 gr::io_signature::make(1, 1, sizeof(std::complex<float>))), // Output: complex samples
-      d_debug(false),
+      d_debug(true),
       d_sf(sf),
       d_bw(bw),
       d_fs(fs),
@@ -243,12 +243,12 @@ int css_modulate_impl::general_work(int noutput_items,
         return 0; // Not enough time has passed to produce any items
     }
 
-    // Debug print
-    if (d_debug == true) {
-        std::cout << "Work called: noutput_items=" << noutput_items 
-                << ", target_items=" << target_items
-                << ", producing=" << items_to_produce << std::endl;
-    }
+    // // Debug print
+    // if (d_debug == true) {
+    //     std::cout << "Work called: noutput_items=" << noutput_items 
+    //             << ", target_items=" << target_items
+    //             << ", producing=" << items_to_produce << std::endl;
+    // }
 
     int produced = 0;
     while (produced < items_to_produce) {
@@ -319,6 +319,7 @@ int css_modulate_impl::general_work(int noutput_items,
                 std::memcpy(out + produced, data_chirp.data(), d_chirp_len * sizeof(std::complex<float>));
                 produced += d_chirp_len;
             }
+            d_pdu_offset += chunk_size;
         } else {
             // No PDU data available - insert zero padding
             int padding_size = (items_to_produce - produced);
@@ -326,17 +327,17 @@ int css_modulate_impl::general_work(int noutput_items,
                 out[produced + i] = static_cast<uint8_t>(0);
             }
             produced += padding_size;
-            if (d_debug == true) {
-                std::cout << "Inserted " << padding_size << " bytes of zero padding" << std::endl;
-            }
+            // if (d_debug == true) {
+            //     std::cout << "Inserted " << padding_size << " bytes of zero padding" << std::endl;
+            // }
         }
     }
 
     // Update timing
     d_last_time = now;
-    if (d_debug == true) {
-        std::cout << "Produced " << produced << " items in this work call" << std::endl;
-    }
+    // if (d_debug == true) {
+    //     std::cout << "Produced " << produced << " items in this work call" << std::endl;
+    // }
     return produced;
 }
 
