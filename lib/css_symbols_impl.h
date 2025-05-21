@@ -45,6 +45,13 @@ private:
     // Output: vector of final symbols
     std::vector<uint32_t> gray_decoding_helper(const std::vector<uint32_t>& interleaved_symbols);
 
+    // Hamming encode
+    uint8_t hamming_encode_nibble(uint8_t nibble, int cr, int sf, int nibble_index);
+    template<typename Func>
+    uint8_t bit_reduce(Func fn, uint8_t w, const std::vector<int>& pos);
+    template<typename Func>
+    uint8_t word_reduce(Func fn, const std::vector<uint8_t>& ws);
+
 public:
     /*!
      * \brief Return a shared_ptr to a new instance of lora::css_symbols.

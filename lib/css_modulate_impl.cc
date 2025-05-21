@@ -202,7 +202,7 @@ void css_modulate_impl::handle_pdu(pmt::pmt_t msg) {
     std::vector<uint8_t> new_pdu(pdu_data, pdu_data + pdu_len);
     d_pdu_queue.push_back(new_pdu);
     
-    if (d_debug = true) {
+    if (d_debug == true) {
         std::cout << "Received new PDU with length " << pdu_len << " bytes" << std::endl;
         std::cout << "Current PDU queue size: " << d_pdu_queue.size() << std::endl;
     }

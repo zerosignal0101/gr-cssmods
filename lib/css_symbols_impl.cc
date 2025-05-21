@@ -96,20 +96,21 @@ std::vector<uint8_t> css_symbols_impl::generate_whitening_seq(size_t max_len_byt
     return seq;
 }
 
-// Calculate total symbols
 int css_symbols_impl::calc_sym_num(size_t plen)
 {
     // Number of payload symbol groups (blocks for interleaving)
     int ppm = d_sf - (d_ldr ? 2 : 0);
-    int rdd_data = d_cr + 4;
     if (ppm <= 0) {
-        // This shouldn't happen for valid SF/LDR, but avoid division by zero
-        throw std::runtime_error("Invalid LoRa parameters resulting in ppm <= 0");
+        throw std::runtime_error("Invalid LoRa parameters");
     }
-    int num_payload_symbol_groups =
-        std::ceil((plen * 8.0) / (4.0 * ppm)); // Number of blocks of 'ppm' nibbles
-    // Total symbols = 8 (header) + num_payload_symbol_groups * (cr+4)
-    int total_symbols = num_payload_symbol_groups * rdd_data;
+    
+    // Equivalent to Matlab's (2*plen - sf + 7 + 4*crc - 5*(1-has_header))
+    // Assuming no header (has_header=false) and no crc (crc=0) for this version
+    double numerator = 2.0 * plen - d_sf + 7 + 0 - 5*(1-0); 
+    
+    int num_payload_symbol_groups = std::ceil(numerator / ppm);
+    int total_symbols = 8 + std::max(num_payload_symbol_groups * (d_cr + 4), 0);
+    
     return total_symbols;
 }
 
@@ -203,28 +204,87 @@ css_symbols_impl::gray_decoding_helper(const std::vector<uint32_t>& interleaved_
     return symbols;
 }
 
+// Hamming encode
+template<typename Func>
+uint8_t css_symbols_impl::bit_reduce(Func fn, uint8_t w, const std::vector<int>& pos) {
+    if (pos.empty()) return 0;
+    
+    // MATLAB's bitget uses 1-based indexing for the LSB (bit 1 is LSB)
+    uint8_t b = (w >> (pos[0] - 1)) & 0x01;
+    
+    for (size_t i = 1; i < pos.size(); ++i) {
+        uint8_t current_bit = (w >> (pos[i] - 1)) & 0x01;
+        b = fn(b, current_bit);
+    }
+    
+    return b;
+}
+template<typename Func>
+uint8_t css_symbols_impl::word_reduce(Func fn, const std::vector<uint8_t>& ws) {
+    if (ws.empty()) return 0;
+    
+    uint8_t w = ws[0];
+    for (size_t i = 1; i < ws.size(); ++i) {
+        w = fn(w, ws[i]);
+    }
+    
+    return w;
+}
+// Updated hamming_encode_nibble function
+uint8_t css_symbols_impl::hamming_encode_nibble(uint8_t nibble, int cr, int sf, int nibble_index) {
+    // Calculate parity bits (note: MATLAB uses 1-based indexing)
+    uint8_t p1 = bit_reduce(std::bit_xor<uint8_t>(), nibble, {1, 3, 4});
+    uint8_t p2 = bit_reduce(std::bit_xor<uint8_t>(), nibble, {1, 2, 4});
+    uint8_t p3 = bit_reduce(std::bit_xor<uint8_t>(), nibble, {1, 2, 3});
+    uint8_t p4 = bit_reduce(std::bit_xor<uint8_t>(), nibble, {1, 2, 3, 4});
+    uint8_t p5 = bit_reduce(std::bit_xor<uint8_t>(), nibble, {2, 3, 4});
+    
+    // Determine current code rate
+    int cr_now = cr; // int cr_now = (nibble_index <= sf - 2) ? 4 : cr;
+    
+    // Apply Hamming encoding based on code rate
+    switch (cr_now) {
+        case 1:
+            return word_reduce(std::bit_or<uint8_t>(), {static_cast<uint8_t>(p4 << 4), nibble});
+        case 2:
+            return word_reduce(std::bit_or<uint8_t>(), {static_cast<uint8_t>(p5 << 5), 
+                                                       static_cast<uint8_t>(p3 << 4), 
+                                                       nibble});
+        case 3:
+            return word_reduce(std::bit_or<uint8_t>(), {static_cast<uint8_t>(p2 << 6), 
+                                                       static_cast<uint8_t>(p5 << 5), 
+                                                       static_cast<uint8_t>(p3 << 4), 
+                                                       nibble});
+        case 4:
+            return word_reduce(std::bit_or<uint8_t>(), {static_cast<uint8_t>(p1 << 7), 
+                                                       static_cast<uint8_t>(p2 << 6), 
+                                                       static_cast<uint8_t>(p5 << 5), 
+                                                       static_cast<uint8_t>(p3 << 4), 
+                                                       nibble});
+        default:
+            throw std::runtime_error("Invalid Code Rate!");
+    }
+}
+
 // Message handler
 void css_symbols_impl::handle_payload_message(pmt::pmt_t msg)
 {
-    // 1. 检查是否是 PDU（字典）
-    if (!pmt::is_dict(msg)) {
-        std::cerr << "css_symbols: Received non-PDU message (expected a dict)."
-                  << std::endl;
+    // 首先检查是否为PDU（即pair类型）
+    if (!pmt::is_pair(msg)) {
+        std::cerr << "css_symbols: Received non-PDU message." << std::endl;
         return;
     }
-    // 2. 提取 "data" 部分
-    pmt::pmt_t data_pmt = pmt::dict_ref(msg, pmt::intern("data"), pmt::PMT_NIL);
-    if (pmt::is_null(data_pmt)) {
-        std::cerr << "css_symbols: PDU has no 'data' field." << std::endl;
+    // 分离元数据和数据部分
+    pmt::pmt_t metadata = pmt::car(msg);  // 元数据（可忽略或按需处理）
+    pmt::pmt_t data = pmt::cdr(msg);      // 实际数据部分
+    // 检查数据是否为u8vector类型
+    if (!pmt::is_u8vector(data)) {
+        std::cerr << "css_symbols: PDU data is not a uint8 vector." << std::endl;
         return;
     }
-    // 3. 检查是否是 u8vector
-    if (!pmt::is_u8vector(data_pmt)) {
-        std::cerr << "css_symbols: PDU 'data' is not a uint8 vector." << std::endl;
-        return;
-    }
-    // 4. 转换为 std::vector<uint8_t>
-    std::vector<uint8_t> payload = pmt::u8vector_elements(data_pmt);
+    // 提取数据到payload
+    std::vector<uint8_t> payload = pmt::u8vector_elements(data);
+
     size_t plen = payload.size();
     // --- Start of Encoding Logic (ported from Matlab encode function) ---
     // 1. Calculate total symbols and needed nibbles
@@ -278,142 +338,55 @@ void css_symbols_impl::handle_payload_message(pmt::pmt_t msg)
         // Handle error
         return;
     }
+
+    // Calc codewords with hamming encode
+    std::vector<uint8_t> codewords;
+    codewords.reserve(data_nibbles.size());
+    for (size_t i = 0; i < data_nibbles.size(); i++) {
+        uint8_t nibble = data_nibbles[i] & 0x0F; // Ensure it's just a nibble
+        codewords.push_back(hamming_encode_nibble(nibble, d_cr, d_sf, i));
+    }
+
     // 5. Interleaving
-    std::vector<uint32_t> interleaved_symbols;
-    interleaved_symbols.reserve(sym_num);
-    // Header block interleaving
-    // Matlab: symbols_i = self.diag_interleave(codewords(1:self.sf-2), 8);
-    // This takes sf-2 nibbles and produces 8 symbols (rdd=8)
-    if (d_sf - 2 > 0 && (size_t)(d_sf - 2) <= data_nibbles.size()) {
-        std::vector<uint8_t> header_nibbles(data_nibbles.begin(),
-                                            data_nibbles.begin() + (d_sf - 2));
-        std::vector<uint32_t> header_symbols =
-            diag_interleave_helper(header_nibbles, 8); // rdd = 8
-        interleaved_symbols.insert(
-            interleaved_symbols.end(), header_symbols.begin(), header_symbols.end());
-    } else if (d_sf - 2 > 0) {
-        std::cerr << "css_symbols: Not enough nibbles for header block. sf-2="
-                  << (d_sf - 2) << ", available=" << data_nibbles.size() << std::endl;
-        // Handle error
-        return;
-    }
-    // Data block interleaving
-    // Matlab: for i = self.sf-1:ppm:length(codewords)-ppm+1 ...
-    // self.diag_interleave(codewords(i:i+ppm-1), rdd) Indices are 1-based in Matlab. i
-    // from sf-1 to length(codewords)-ppm+1 step ppm. In 0-based C++, indices are from
-    // (sf-2) to (nibble_num - ppm) step ppm.
-    int current_nibble_idx = d_sf - 2;
-    ppm = d_sf - (d_ldr ? 2 : 0); // Recalculate ppm just in case
-    while (current_nibble_idx < nibble_num) {
-        // Ensure we have a full block
-        if (current_nibble_idx + ppm > nibble_num) {
-            // This should not happen if nibble_num calculation aligns with ppm block size
-            std::cerr << "css_symbols: Partial nibble block remaining. Index: "
-                      << current_nibble_idx << ", ppm: " << ppm
-                      << ", nibble_num: " << nibble_num << std::endl;
-            break; // Or handle as error
-        }
-        std::vector<uint8_t> data_block_nibbles(data_nibbles.begin() + current_nibble_idx,
-                                                data_nibbles.begin() +
-                                                    current_nibble_idx + ppm);
-        std::vector<uint32_t> data_block_symbols =
-            diag_interleave_helper(data_block_nibbles, d_cr + 4); // rdd = cr+4
-        interleaved_symbols.insert(interleaved_symbols.end(),
-                                   data_block_symbols.begin(),
-                                   data_block_symbols.end());
-        current_nibble_idx += ppm;
-    }
-    // Check if total interleaved symbols match sym_num (excluding potential initial
-    // preamble symbols not generated here) The Matlab code generates 'sym_num' total
-    // symbols *after* Gray decoding. The interleaving produces symbols_i, then
-    // gray_decoding transforms symbols_i to symbols. The number of interleaved symbols
-    // generated should be exactly `sym_num`.
-    if ((int)interleaved_symbols.size() != sym_num) {
-        // This indicates a mismatch in how symbols are counted or interleaved blocks are
-        // processed
-        std::cerr << "css_symbols: Interleaved symbol count mismatch. Expected "
-                  << sym_num << ", got " << interleaved_symbols.size() << std::endl;
-        // Handle error
-        // Proceeding with the calculated symbols might still be possible, but indicates a
-        // logic error Let's resize to sym_num if we got more, or pad with dummy symbols
-        // if we got less? Or just flag error and stop. For this port, flag error. return;
-        // // Or decide how to handle Let's trust the logic derived that interleaving sf-2
-        // nibbles yields 8 symbols, and ppm nibbles yields rdd symbols. Total symbols = 8
-        // + #data_blocks * rdd. #data_blocks = (nibble_num - (sf-2)) / ppm. Total symbols
-        // = 8 + (nibble_num - sf + 2) / ppm * rdd Substituting nibble_num: 8 + (sf-2 +
-        // (sym_num-8)/rdd*ppm - sf + 2) / ppm * rdd = 8 + ((sym_num-8)/rdd*ppm) / ppm *
-        // rdd = 8 + (sym_num-8)/rdd * rdd = 8 + sym_num - 8 = sym_num. The number of
-        // interleaved symbols *should* equal sym_num. The formula for
-        // num_payload_symbol_groups might need integer division handling carefully.
-        // (sym_num - 8) must be a multiple of (cr+4).
-        // Let's re-evaluate calc_sym_num one more time. The number of *payload* symbols
-        // must be a multiple of cr+4. Total bits = plen*8 + 16. Need enough data blocks
-        // to cover this. Each data block (ppm nibbles) corresponds to 4*ppm data bits...
-        // no, this is number of nibbles. The number of *coded* bits for payload is
-        // ceil((plen*8+16.0)/(4.0*(d_cr+4))) * (4.0*(d_cr+4)). These coded bits are
-        // spread over symbols. Each symbol has sf bits. Number of symbols for payload =
-        // ceil((plen*8+16.0 + 20.0*d_ldr - 4.0*d_sf)/(4.0*(d_cr+4))) * (d_cr+4) + 8 //
-        // This formula seems to include header bits in ceil Let's assume the count
-        // `num_payload_symbol_groups` is correct and the total interleaved symbols is `8
-        // + num_payload_symbol_groups * (d_cr+4)`. This *must* equal `sym_num`. If not,
-        // there's a formula mismatch. Let's trust the calculation leading to `sym_num = 8
-        // + num_payload_symbol_groups * rdd_data;` and `nibble_num = (d_sf - 2) +
-        // num_payload_symbol_groups * ppm;`. These should align. The number of
-        // interleaved symbols will be exactly `8 + num_payload_symbol_groups * rdd_data`,
-        // which is `sym_num`. The mismatch message is likely due to floor/ceil issues or
-        // off-by-one in the loop. Let's check the loop range again. Matlab: i from sf-1
-        // to length(codewords)-ppm+1 step ppm. 0-based: from (sf-2) to (nibble_num - ppm)
-        // inclusive step ppm. Total blocks = ((nibble_num - ppm) - (sf-2)) / ppm + 1?
-        // Let's use index `k` for the block number, starting from 0.
-        // k = 0: nibbles[sf-2 to sf-2+ppm-1]. Index range [sf-2, sf+ppm-3]. Start index
-        // (sf-2) k = 1: nibbles[sf-2+ppm to sf-2+2*ppm-1]. Start index (sf-2+ppm) k =
-        // N-1: nibbles[sf-2+(N-1)*ppm to sf-2+N*ppm-1]. Last start index: sf-2+(N-1)*ppm.
-        // This must be <= nibble_num - ppm. sf-2 + (N-1)*ppm <= nibble_num - ppm sf-2 +
-        // N*ppm - ppm <= nibble_num - ppm sf-2 + N*ppm <= nibble_num N*ppm <= nibble_num
-        // - (sf-2) N <= (nibble_num - sf + 2) / ppm N is the number of data blocks. N =
-        // (nibble_num - sf + 2) / ppm. Is nibble_num - sf + 2 always a multiple of ppm?
-        // Yes, from nibble_num formula: nibble_num - sf + 2 = (sym_num-8)/rdd*ppm. Since
-        // (sym_num-8) is a multiple of rdd, (sym_num-8)/rdd is integer, so
-        // (sym_num-8)/rdd*ppm is integer. So N = (nibble_num - sf + 2) / ppm is number of
-        // blocks. Total symbols = 8 + N * rdd. This is sym_num. The loop should run
-        // exactly N times. Start index `sf-2`, step `ppm`. Loop N times. Example:
-        // nibble_num=520, sf=7, ppm=5, rdd=5. Header nibbles = 7-2=5. Data nibbles =
-        // 520-5=515. N=515/5=103. Loop starts at index 5. Steps: 5, 10, 15, ... Last
-        // start index = 5 + (103-1)*5 = 5 + 102*5 = 5 + 510 = 515. Last block:
-        // nibbles[515 to 515+5-1] = nibbles[515 to 519]. Correct. The loop `for (size_t
-        // k=0; k < N; ++k)` iterating data blocks is safer.
-        current_nibble_idx = d_sf - 2;
-        for (int k = 0; k < num_payload_symbol_groups; ++k) {
-            std::vector<uint8_t> data_block_nibbles(
-                data_nibbles.begin() + current_nibble_idx,
-                data_nibbles.begin() + current_nibble_idx + ppm);
-            std::vector<uint32_t> data_block_symbols =
-                diag_interleave_helper(data_block_nibbles, d_cr + 4); // rdd = cr+4
-            interleaved_symbols.insert(interleaved_symbols.end(),
-                                       data_block_symbols.begin(),
-                                       data_block_symbols.end());
-            current_nibble_idx += ppm;
-        }
-        if ((int)interleaved_symbols.size() != sym_num) {
-            std::cerr << "css_symbols: ERROR - Interleaved symbol count mismatch AFTER "
-                         "re-check. Expected "
-                      << sym_num << ", got " << interleaved_symbols.size() << std::endl;
-            // This is a critical error in logic or formulas
-            return;
+    // Calculate ppm and rdd based on member variables
+    int rdd = d_cr + 4;
+    // Initialize the vector to store the interleaved symbols
+    std::vector<uint32_t> symbols_i;
+    // Basic validation for ppm to avoid issues (Matlab might handle implicitly)
+    if (ppm <= 0) {
+        // Handle error: ppm must be a positive block size.
+        throw std::runtime_error("ppm must be a positive block size.");
+    } else {
+        // Loop through codewords vector in blocks of size ppm
+        // Matlab loop: for i = 1:ppm:length(codewords)-ppm+1
+        // C++ loop (0-based indexing): for (int i = 0; i <= (int)codewords.size() - ppm; i += ppm)
+        // Or, safer with size_t and checking available size:
+        for (size_t i = 0; i + ppm <= codewords.size(); i += ppm) {
+            // Extract the current block of 'ppm' nibbles (uint8_t)
+            // In C++, we create a sub-vector for the slice
+            std::vector<uint8_t> nibbles_block(codewords.begin() + i, codewords.begin() + i + ppm);
+            // Call the helper function to interleave the block
+            std::vector<uint32_t> result_block = diag_interleave_helper(nibbles_block, rdd);
+            // Append the resulting interleaved symbols to the main vector
+            // Matlab concatenation [symbols_i; result_block] corresponds to appending
+            symbols_i.insert(symbols_i.end(), result_block.begin(), result_block.end());
         }
     }
+    
     // 6. Gray Decoding
-    std::vector<uint32_t> final_symbols = gray_decoding_helper(interleaved_symbols);
+    std::vector<uint32_t> final_symbols = gray_decoding_helper(symbols_i);
     // --- End of Encoding Logic ---
-    // Output the symbols as a message
-    pmt::pmt_t value = pmt::init_u32vector(final_symbols.size(), final_symbols.data());
+    // --- 转换为u8 vector ---
+    std::vector<uint8_t> final_symbols_u8;
+    final_symbols_u8.reserve(final_symbols.size()); // 预分配空间提高效率
+    for (const auto& val : final_symbols) {
+        final_symbols_u8.push_back(static_cast<uint8_t>(val)); // 安全截断到8位
+    }
+    // --- 更新PMT生成部分为u8格式 ---
+    pmt::pmt_t value = pmt::init_u8vector(final_symbols_u8.size(), final_symbols_u8.data());
     pmt::pmt_t output_msg = pmt::cons(pmt::make_dict(), value);
-    // Optionally copy input tags to output message if using tagged stream input
-    // pmt::set_tags(output_msg, pmt::tags(msg)); // If msg came from a stream with tags
+    // 发布消息
     message_port_pub(pmt::mp("out"), output_msg);
-    // In a real packet encoder, you might also add preamble/sync word symbols *before*
-    // final_symbols here. The provided code implies it generates *only* the
-    // header/payload symbols.
 }
 
 // Destructor
