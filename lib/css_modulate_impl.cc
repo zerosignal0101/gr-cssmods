@@ -119,7 +119,7 @@ css_modulate_impl::css_modulate_impl(
     : gr::block("css_modulate",
                 gr::io_signature::make(0, 0, 0), // No streaming input
                 gr::io_signature::make(1, 1, sizeof(std::complex<float>))), // Output: complex samples
-      d_debug(true),
+      d_debug(false),
       d_sf(sf),
       d_bw(bw),
       d_fs(fs),
@@ -132,6 +132,7 @@ css_modulate_impl::css_modulate_impl(
       d_last_time(std::chrono::steady_clock::now()),
       d_items_per_second(fs),
       d_items_per_us(fs / 1e6),
+      d_target_items(0),
       d_upchirp(),
       d_downchirp()
 {
@@ -226,60 +227,86 @@ void css_modulate_impl::forecast(int noutput_items, gr_vector_int& ninput_items_
 int css_modulate_impl::general_work(int noutput_items,
                                     gr_vector_int& ninput_items,
                                     gr_vector_const_void_star& input_items,
-                                    gr_vector_void_star& output_items)
+                                    gr_vector_void_star& output_items) 
 {
+    if (d_debug) {
+        std::cout << "\n=== WORK CALL START ===" << std::endl;
+        std::cout << "[INIT] noutput_items=" << noutput_items 
+                  << ", input_items.size()=" << input_items.size() << std::endl;
+    }
+
     gr::thread::scoped_lock guard(d_mutex);
     std::complex<float>* out = reinterpret_cast<std::complex<float>*>(output_items[0]);
     
-    // Calculate how many items we should produce based on time elapsed
+    // Timing calculation
     auto now = std::chrono::steady_clock::now();
     auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(now - d_last_time);
     double elapsed_seconds = elapsed.count() / 1e6;
-    int target_items = static_cast<int>(std::round(elapsed_seconds * d_fs));
+    int target_items = static_cast<int>(std::round(elapsed_seconds * d_fs)) + d_target_items;
+    // Clear temp target items
+    d_target_items = 0;
 
-    // Limit to the requested noutput_items
-    int items_to_produce = std::min(target_items, noutput_items);
-    if (items_to_produce <= 0) {
-        return 0; // Not enough time has passed to produce any items
+    if (d_debug) {
+        std::cout << "[TIMING] Elapsed=" << elapsed.count() << "us (" 
+                  << elapsed_seconds << "s), target_items=" << target_items << std::endl;
     }
 
-    // // Debug print
-    // if (d_debug == true) {
-    //     std::cout << "Work called: noutput_items=" << noutput_items 
-    //             << ", target_items=" << target_items
-    //             << ", producing=" << items_to_produce << std::endl;
-    // }
+    int items_to_produce = std::min(target_items, noutput_items);
+    if (items_to_produce <= 0) {
+        if (d_debug) {
+            std::cout << "[EARLY EXIT] Not enough time elapsed (0 items to produce)" << std::endl;
+        }
+        return 0;
+    }
+
+    if (d_debug) {
+        std::cout << "[PRODUCTION] items_to_produce=" << items_to_produce 
+                  << ", chirp_len=" << d_chirp_len << std::endl;
+    }
 
     int produced = 0;
     while (produced < items_to_produce) {
-        // Check if we need to start a new PDU
+        // Check PDU completion
         if (!d_current_pdu.empty() && d_pdu_offset >= d_current_pdu.size()) {
-            if (d_debug == true) {
-                std::cout << "Finished processing current PDU (length=" 
-                        << d_current_pdu.size() << ")" << std::endl;
+            if (d_debug) {
+                std::cout << "[PDU COMPLETE] Processed PDU (size=" 
+                          << d_current_pdu.size() << "), offset=" << d_pdu_offset << std::endl;
             }
             d_current_pdu.clear();
             d_pdu_offset = 0;
         }
 
+        // Start new PDU if needed
         if (d_current_pdu.empty() && !d_pdu_queue.empty()) {
             if ((items_to_produce - produced) < d_header_len) {
-                if (d_debug == false) {
-                    std::cout << "Can not find enough space to write header, waiting for next try." << std::endl;
+                if (d_debug) {
+                    std::cout << "[HEADER LEN] Insufficient space for header (needs " 
+                              << d_header_len << ", available " << (items_to_produce-produced) 
+                              << ")" << std::endl;
                 }
                 break;
             }
+
             d_current_pdu = d_pdu_queue.front();
             d_pdu_queue.pop_front();
             d_pdu_offset = 0;
 
-            // 2. 添加前导码 (preamble_len * uc)
+            if (d_debug) {
+                std::cout << "[NEW PDU] Starting PDU (size=" << d_current_pdu.size() 
+                          << "), queue remaining=" << d_pdu_queue.size() << std::endl;
+                std::cout << "  [PREAMBLE] Adding " << d_preamble_len << " upchirps" << std::endl;
+            }
+
+            // Add preamble
             for (int i = 0; i < d_preamble_len; ++i) {
                 std::memcpy(out + produced, d_upchirp.data(), d_chirp_len * sizeof(std::complex<float>));
                 produced += d_chirp_len;
             }
 
-            // 3. 添加 NetID (uc_24, uc_32)
+            if (d_debug) {
+                std::cout << "  [NETID] Adding NetID chirps (24 & 32)" << std::endl;
+            }
+            // Add NetID
             std::vector<std::complex<float>> netid1_chirp = generate_lora_chirp(true, d_sf, d_bw, d_fs, 24, d_cfo);
             std::vector<std::complex<float>> netid2_chirp = generate_lora_chirp(true, d_sf, d_bw, d_fs, 32, d_cfo);
             std::memcpy(out + produced, netid1_chirp.data(), d_chirp_len * sizeof(std::complex<float>));
@@ -287,59 +314,105 @@ int css_modulate_impl::general_work(int noutput_items,
             std::memcpy(out + produced, netid2_chirp.data(), d_chirp_len * sizeof(std::complex<float>));
             produced += d_chirp_len;
 
-            // 4. 添加 SFD (dc, dc, dc[1:chirp_len/4])
+            if (d_debug) {
+                std::cout << "  [SFD] Adding SFD (2 downchirps + partial)" << std::endl;
+            }
+            // Add SFD
             std::memcpy(out + produced, d_downchirp.data(), d_chirp_len * sizeof(std::complex<float>));
             produced += d_chirp_len;
             std::memcpy(out + produced, d_downchirp.data(), d_chirp_len * sizeof(std::complex<float>));
             produced += d_chirp_len;
             std::memcpy(out + produced, d_downchirp.data(), d_sfd_len * sizeof(std::complex<float>));
             produced += d_sfd_len;
-            
-            if (d_debug == true) {
-                std::cout << "Starting new PDU (length=" << d_current_pdu.size() 
-                            << "), queue size now=" << d_pdu_queue.size() << std::endl;
-            }
         }
 
-        // Determine how many items we can produce in this iteration
+        // Data processing
         int remaining_request = (items_to_produce - produced) / d_chirp_len;
         int remaining_pdu = d_current_pdu.empty() ? 0 : (d_current_pdu.size() - d_pdu_offset);
         int chunk_size = std::min(remaining_request, remaining_pdu);
 
-        size_t total_out_samples_to_write = chunk_size * d_chirp_len;
+        if (d_debug) {
+            std::cout << "[DATA] remaining_request=" << remaining_request 
+                      << ", remaining_pdu=" << remaining_pdu 
+                      << ", chunk_size=" << chunk_size << std::endl;
+        }
 
         if (chunk_size > 0) {
-            // 5. 添加数据符号（仅处理 chunk_size 个）
+            if (d_debug) {
+                std::cout << "  [PROCESSING] Writing " << chunk_size << " data symbols (offset=" 
+                          << d_pdu_offset << ")" << std::endl;
+            }
+            
             for (int i = 0; i < chunk_size; ++i) {
                 int symbol = d_current_pdu[d_pdu_offset + i];
+                if (d_debug) {
+                    std::cout << "    [SYMBOL " << i << "] value=" << symbol;
+                    if (i == 0) std::cout << " (first)";
+                    if (i == chunk_size-1) std::cout << " (last)";
+                    std::cout << std::endl;
+                }
+                
                 std::vector<std::complex<float>> data_chirp = generate_lora_chirp(true, d_sf, d_bw, d_fs, symbol, d_cfo);
                 if (data_chirp.size() != d_chirp_len) {
+                    if (d_debug) {
+                        std::cerr << "[ERROR] Invalid chirp size: " << data_chirp.size() 
+                                  << " (expected " << d_chirp_len << ")" << std::endl;
+                    }
                     return 0;
                 }
                 std::memcpy(out + produced, data_chirp.data(), d_chirp_len * sizeof(std::complex<float>));
                 produced += d_chirp_len;
             }
             d_pdu_offset += chunk_size;
-        } else {
-            // No PDU data available - insert zero padding
+        } 
+        else if (remaining_pdu > 0 || !d_pdu_queue.empty()) {
+            if (d_debug) {
+                std::cout << "[WAIT] PDU data available (remaining=" << remaining_pdu 
+                          << ", queue=" << d_pdu_queue.size() 
+                          << ") but no space for full chirp" << std::endl;
+            }
+            break;
+        } 
+        else {
             int padding_size = (items_to_produce - produced);
+            if (d_debug) {
+                std::cout << "[PADDING] Inserting " << padding_size 
+                          << " zero samples (no PDU data)" << std::endl;
+            }
+            
             for (int i = 0; i < padding_size; i++) {
                 out[produced + i] = static_cast<uint8_t>(0);
             }
             produced += padding_size;
-            // if (d_debug == true) {
-            //     std::cout << "Inserted " << padding_size << " bytes of zero padding" << std::endl;
-            // }
         }
     }
 
+    // Temporary save unused target_items
+    if (produced < target_items) {
+        d_target_items = target_items - produced;
+        if (d_debug) {
+            std::cout << "[SAVE] target_items " << d_target_items << std::endl;
+        }
+        // 检查处理速度是否过慢
+        if (d_target_items > 1e6) {
+            std::string error_msg = "Processing too slow! Unprocessed items (" + 
+                                std::to_string(d_target_items) + 
+                                ") exceed threshold (1,000,000). Cannot generate and send data in real-time.";
+            std::cerr << "[WARNING] " << error_msg << std::endl;
+        }
+    }
+
+
     // Update timing
     d_last_time = now;
-    // if (d_debug == true) {
-    //     std::cout << "Produced " << produced << " items in this work call" << std::endl;
-    // }
+    if (d_debug) {
+        std::cout << "[WORK COMPLETE] Produced " << produced << "/" << items_to_produce 
+                  << " items (total " << produced << ")" << std::endl;
+        std::cout << "=== WORK CALL END ===\n" << std::endl;
+    }
     return produced;
 }
+
 
 
 } /* namespace cssmods */

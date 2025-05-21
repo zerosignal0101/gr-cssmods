@@ -55,6 +55,7 @@ private:
     std::chrono::time_point<std::chrono::steady_clock> d_last_time;
     double d_items_per_second;
     double d_items_per_us;
+    int d_target_items;
 
     // Pre calculated chirp
     std::vector<std::complex<float>> d_upchirp;
