@@ -8,6 +8,8 @@
 #include "css_frame_sync_impl.h"
 #include <gnuradio/io_signature.h>
 #include <gnuradio/fft/fft.h>
+#include <gnuradio/fft/window.h>
+#include <volk/volk.h>
 #include <gnuradio/types.h> // For gr_complex
 #include <cmath>
 #include <numeric> // For std::accumulate

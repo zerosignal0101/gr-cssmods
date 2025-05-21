@@ -24,7 +24,7 @@ if(NOT cssmods_sources)
 endif(NOT cssmods_sources)
 
 add_library(gnuradio-cssmods SHARED ${cssmods_sources})
-target_link_libraries(gnuradio-cssmods gnuradio::gnuradio-runtime)
+target_link_libraries(gnuradio-cssmods gnuradio::gnuradio-runtime gnuradio::gnuradio-fft Volk::volk)
 target_include_directories(gnuradio-cssmods
     PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../include>
     PUBLIC $<INSTALL_INTERFACE:include>

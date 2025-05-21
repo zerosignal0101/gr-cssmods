@@ -11,6 +11,8 @@
 #include <gnuradio/cssmods/css_frame_sync.h>
 #include "css_modulate_impl.h" // For generate_lora_chirp
 #include <gnuradio/fft/fft.h>
+#include <gnuradio/fft/window.h>
+#include <volk/volk.h>
 #include <complex>
 #include <vector>
 
