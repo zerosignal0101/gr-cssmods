@@ -1,5 +1,5 @@
 id: cssmods_css_symbols
-label: css_symbols
+label: CSS Symbols
 category: '[cssmods]'
 
 templates:
@@ -13,35 +13,48 @@ templates:
 #     * dtype (e.g. int, float, complex, byte, short, xxx_vector, ...)
 #     * default
 parameters:
-- id: parametername_replace_me
-  label: FIX ME:
-  dtype: string
-  default: You need to fill in your grc/cssmods_css_symbols.block.yaml
-#- id: ...
-#  label: ...
-#  dtype: ...
+- id: sf
+  label: Spreading Factor (SF)
+  dtype: int
+  default: 7
+  options: [7, 8, 9, 10, 11, 12]
+  option_labels: ['7', '8', '9', '10', '11', '12']
+  
+- id: cr
+  label: Code Rate (CR)
+  dtype: int
+  default: 1
+  options: [1, 2, 3, 4]
+  option_labels: ['4/5', '4/6', '4/7', '4/8']
+  
+- id: ldr
+  label: Low Data Rate (LDR)
+  dtype: bool
+  default: False
 
-#  Make one 'inputs' list entry per input and one 'outputs' list entry per output.
-#  Keys include:
-#      * label (an identifier for the GUI)
-#      * domain (optional - stream or message. Default is stream)
-#      * dtype (e.g. int, float, complex, byte, short, xxx_vector, ...)
-#      * vlen (optional - data stream vector length. Default is 1)
-#      * optional (optional - set to 1 for optional inputs. Default is 0)
 inputs:
-#- label: ...
-#  domain: ...
-#  dtype: ...
-#  vlen: ...
-#  optional: ...
-
+- domain: message
+  id: in
+  label: in
+  optional: false
 outputs:
-#- label: ...
-#  domain: ...
-#  dtype: ...
-#  vlen: ...
-#  optional: ...
-
-#  'file_format' specifies the version of the GRC yml format used in the file
-#  and should usually not be changed.
+- domain: message
+  id: out
+  label: out
+  optional: false
 file_format: 1
+documentation: |
+  # LoRa CSS Symbols Block
+  
+  LoRa Physical Layer Encoding: Payload bytes to symbols.
+  Implements padding, whitening, nibble extraction,
+  diagonal interleaving, and Gray decoding based on Matlab code.
+  Assumes Implicit Header and CRC.
+  
+  Parameters:
+  - **Spreading Factor (SF)**: Determines the number of bits per symbol (7-12)
+  - **Code Rate (CR)**: Error correction coding rate (1=4/5, 2=4/6, 3=4/7, 4=4/8)
+  - **Low Data Rate (LDR)**: Boolean flag for low data rate optimization
+  
+  Input: Message containing payload bytes
+  Output: Message containing encoded symbols

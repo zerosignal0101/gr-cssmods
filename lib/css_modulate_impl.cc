@@ -119,7 +119,7 @@ css_modulate_impl::css_modulate_impl(
     : gr::block("css_modulate",
                 gr::io_signature::make(0, 0, 0), // No streaming input
                 gr::io_signature::make(1, 1, sizeof(std::complex<float>))), // Output: complex samples
-      d_debug(true),
+      d_debug(false),
       d_sf(sf),
       d_bw(bw),
       d_fs(fs),
