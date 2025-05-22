@@ -44,10 +44,12 @@ css_frame_sync_impl::css_frame_sync_impl(int sf, double bw, int zero_padding_rat
         d_sample_num(2 * (1 << sf)), // Samples per symbol at 2*BW sampling rate
         d_bin_num((1 << sf) * zero_padding_ratio), // Number of relevant bins after zero-padding
         d_fft_len(d_sample_num * zero_padding_ratio), // FFT length including zero-padding
+        d_preamble_len(8),
         d_debug(true), // *** Initialize debug flag to true ***
         d_state(STATE_IDLE),
         d_current_search_pos(0), // Absolute stream index
-        d_preamble_bin(0),
+        d_preamble_bin(-1),
+        d_preamble_counter(0),
         d_cfo(0.0)
 {
     if (d_debug) {
@@ -134,7 +136,7 @@ void css_frame_sync_impl::print_complex_vector(const std::vector<gr_complex>& ve
 
 // Dechirp helper function: Apply conjugated nominal chirp, perform FFT, find peak
 std::pair<float, int>
-css_frame_sync_impl::dechirp(const gr_complex *input_buffer, size_t buffer_offset_in_buffer, bool is_up)
+css_frame_sync_impl::dechirp(const gr_complex *input_buffer, int64_t buffer_offset_in_buffer, bool is_up)
 {
     // Need d_sample_num samples from the input buffer starting at buffer_offset_in_buffer
     // for the dechirping step.
@@ -250,9 +252,118 @@ int css_frame_sync_impl::work(int noutput_items,
                 if (d_debug) {
                     fprintf(stderr, "css_frame_sync_impl::work: State IDLE. Transitioning to SEARCHING_DOWNCHIRP.\n");
                 }
-                d_state = STATE_SEARCHING_DOWNCHIRP;
+                d_state = STATE_SEARCHING_PREAMBLE;
                 // No break, fallthrough or re-evaluate loop condition to process new state
+            
+            case STATE_SEARCHING_PREAMBLE: {
+                while (d_current_search_pos + d_sample_num <= abs_end_pos) {
+                    int64_t current_symbol_start_in_buffer = d_current_search_pos - abs_read_pos;
+                    std::pair<float, int> up_peak = dechirp(in, current_symbol_start_in_buffer, true);
 
+                    // Re-check if enough data from the new start pos
+                    if (d_current_search_pos + d_sample_num > abs_end_pos) {
+                        // Not enough data even from the buffer start, break search loop
+                        if (d_debug) {
+                        fprintf(stderr, "css_frame_sync_impl::work: State SEARCHING_PREAMBLE. Not enough data (%ld < %d) even from buffer start %ld. Waiting for more data.\n",
+                                abs_end_pos - d_current_search_pos, d_sample_num, d_current_search_pos);
+                        }
+                        break; // Exit while loop, return noutput_items
+                    }
+
+                    if (d_debug) {
+                        fprintf(stderr, "css_frame_sync_impl::work: State SEARCHING_PREAMBLE. Checking abs_pos %ld (buffer_offset %ld). Up peak: (mag=%.2f, bin=%d).\n",
+                                d_current_search_pos, current_symbol_start_in_buffer, up_peak.first, up_peak.second);
+                    }
+
+                    // Check for upchirp detection
+                    if (up_peak.first < 100.0) {
+                        if (d_debug) {
+                            std::cout << "css_frame_sync_impl::work: State SEARCHING_PREAMBLE. "
+                                    << "Invalid upchirp detected with peak value " << up_peak.first 
+                                    << " (below threshold 100.0)" << std::endl;
+                        }
+                        // Invalid symbol
+                    }
+                    else if (d_preamble_bin == -1) {
+                        if (d_debug) {
+                            std::cout << "css_frame_sync_impl::work: State SEARCHING_PREAMBLE. "
+                                    << "First valid upchirp detected at bin " << up_peak.second 
+                                    << " with peak value " << up_peak.first << std::endl;
+                        }
+                        d_preamble_bin = up_peak.second;
+                        d_preamble_counter = 1;
+                        
+                        if (d_debug) {
+                            std::cout << "css_frame_sync_impl::work: State SEARCHING_PREAMBLE. "
+                                    << "Initialized preamble tracking - bin: " << d_preamble_bin 
+                                    << ", counter: " << d_preamble_counter << std::endl;
+                        }
+                    }
+                    else {
+                        int bin_diff = (d_preamble_bin - up_peak.second + d_bin_num) % d_bin_num;
+                        if (bin_diff > d_bin_num / 2) {
+                            bin_diff = d_bin_num - bin_diff;
+                        }
+                        
+                        if (d_debug) {
+                            std::cout << "css_frame_sync_impl::work: State SEARCHING_PREAMBLE. "
+                                    << "Previous bin: " << d_preamble_bin 
+                                    << ", Current bin: " << up_peak.second 
+                                    << ", Raw diff: " << (d_preamble_bin - up_peak.second)
+                                    << ", Wrapped diff: " << bin_diff 
+                                    << ", Threshold: " << d_zero_padding_ratio << std::endl;
+                        }
+
+                        // Check the difference between current and last chirp
+                        if (bin_diff < d_zero_padding_ratio) {
+                            d_preamble_counter++;
+                            
+                            if (d_debug) {
+                                std::cout << "css_frame_sync_impl::work: State SEARCHING_PREAMBLE. "
+                                        << "Consistent upchirp detected. Incrementing counter to: " 
+                                        << d_preamble_counter << std::endl;
+                            }
+                            
+                            if (d_preamble_counter == d_preamble_len - 1) {
+                                if (d_debug) {
+                                    std::cout << "css_frame_sync_impl::work: State SEARCHING_PREAMBLE. "
+                                            << "Preamble detected! Transitioning to SEARCHING_DOWNCHIRP state. "
+                                            << "Detected " << d_preamble_counter 
+                                            << " consistent upchirps (threshold was " 
+                                            << (d_preamble_len - 1) << ")" << std::endl;
+                                }
+                                d_state = STATE_SEARCHING_DOWNCHIRP;
+                                // Restore to default value
+                                d_preamble_counter = 0;
+                                d_preamble_bin = -1;
+                                goto end_search_preamble;
+                            }
+                        }
+                        else {
+                            if (d_debug) {
+                                std::cout << "css_frame_sync_impl::work: State SEARCHING_PREAMBLE. "
+                                        << "Inconsistent upchirp detected. Bin difference " << bin_diff 
+                                        << " exceeds threshold " << d_zero_padding_ratio 
+                                        << ". Resetting counter to 1." << std::endl;
+                            }
+                            d_preamble_counter = 1;
+                        }
+                        
+                        if (d_debug) {
+                            std::cout << "css_frame_sync_impl::work: State SEARCHING_PREAMBLE. "
+                                    << "Updating tracking bin from " << d_preamble_bin 
+                                    << " to " << up_peak.second << std::endl;
+                        }
+                        d_preamble_bin = up_peak.second;
+                    }
+
+
+                    // Move to the next symbol position to search
+                    d_current_search_pos += d_sample_num;
+                }
+            end_search_preamble:;
+            }
+                
             case STATE_SEARCHING_DOWNCHIRP: {
                 // Need d_sample_num samples for dechirping a symbol.
                 // The search proceeds in steps of d_sample_num.
@@ -262,30 +373,14 @@ int css_frame_sync_impl::work(int noutput_items,
                     // We have enough data *from the current search position* within the current buffer.
                     int64_t current_symbol_start_in_buffer = d_current_search_pos - abs_read_pos;
 
-                    // Ensure the symbol we want to check actually starts within or after the current buffer start.
-                    // If d_current_search_pos was before abs_read_pos, we need to jump the search forward
-                    // to the start of the current buffer, unless that position is within history.
-                    // However, the typical flow is that d_current_search_pos advances.
-                    // If it's < 0, it means the block started late, or history wasn't enough previously.
-                    // For search, we only search forward from the start of the *current* buffer chunk.
-                    // If d_current_search_pos is before abs_read_pos, we should update it to abs_read_pos
-                    // to avoid processing old data/relying on history for the search phase.
-                    if (d_current_search_pos < abs_read_pos) {
-                         if (d_debug) {
-                            fprintf(stderr, "css_frame_sync_impl::work: State SEARCHING_DOWNCHIRP. Search position %ld is before buffer start %ld. Adjusting search start to buffer start.\n",
-                                d_current_search_pos, abs_read_pos);
-                         }
-                         d_current_search_pos = abs_read_pos;
-                         current_symbol_start_in_buffer = 0;
-                         // Re-check if enough data from the new start pos
-                         if (d_current_search_pos + d_sample_num > abs_end_pos) {
-                             // Not enough data even from the buffer start, break search loop
-                             if (d_debug) {
-                                fprintf(stderr, "css_frame_sync_impl::work: State SEARCHING_DOWNCHIRP. Not enough data (%ld < %d) even from buffer start %ld. Waiting for more data.\n",
-                                        abs_end_pos - d_current_search_pos, d_sample_num, d_current_search_pos);
-                             }
-                             break; // Exit while loop, return noutput_items
-                         }
+                    // Re-check if enough data from the new start pos
+                    if (d_current_search_pos + d_sample_num > abs_end_pos) {
+                        // Not enough data even from the buffer start, break search loop
+                        if (d_debug) {
+                        fprintf(stderr, "css_frame_sync_impl::work: State SEARCHING_DOWNCHIRP. Not enough data (%ld < %d) even from buffer start %ld. Waiting for more data.\n",
+                                abs_end_pos - d_current_search_pos, d_sample_num, d_current_search_pos);
+                        }
+                        break; // Exit while loop, return noutput_items
                     }
 
                     // Perform dechirp on the symbol at d_current_search_pos
@@ -553,6 +648,7 @@ int css_frame_sync_impl::work(int noutput_items,
                      fprintf(stderr, "!!!!! css_frame_sync: Frame Sync Found! Tag added at absolute position %ld. !!!!!\n", x_sync);
                 }
 
+                d_current_search_pos = x_sync;
 
                 d_state = STATE_SYNC_COMPLETE; // Synchronization is complete for this frame
                 // No break needed, loop condition will be false and loop will exit
