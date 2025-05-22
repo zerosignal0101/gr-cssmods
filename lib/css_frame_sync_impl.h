@@ -9,7 +9,7 @@
 #define INCLUDED_CSSMODS_CSS_FRAME_SYNC_IMPL_H
 
 #include <gnuradio/cssmods/css_frame_sync.h>
-#include "css_modulate_impl.h" // For generate_lora_chirp
+#include "css_modulate_impl.h" // For generate_lora_chirp definition (assuming it's in a header accessible via path)
 #include <gnuradio/fft/fft.h>
 #include <gnuradio/fft/window.h>
 #include <volk/volk.h>
@@ -22,11 +22,11 @@ namespace cssmods {
 // State machine for synchronization process
 enum sync_state_t {
     STATE_IDLE,                      // Initial state, searching hasn't started effectively
-    STATE_SEARCHING_DOWNCHIRP,       // Searching for the first sync downchirp
-    STATE_REFINING_POSITION,         // Refining the start index using the downchirp peak
-    STATE_CFO_CALCULATING,           // Calculating CFO using preamble upchirp
-    STATE_PAYLOAD_START_CALCULATING, // Determining the exact payload start index
-    STATE_SYNC_COMPLETE              // Frame synchronized, just pass data (or stop)
+    STATE_SEARCHING_DOWNCHIRP,       // Searching for the first sync downchirp symbol
+    STATE_REFINING_POSITION,         // Refining the start index of the downchirp using its peak
+    STATE_CFO_CALCULATING,           // Calculating CFO using the last preamble upchirp symbol
+    STATE_PAYLOAD_START_CALCULATING, // Determining the exact payload start index based on sync word position
+    STATE_SYNC_COMPLETE              // Frame synchronization complete, tag added, pass data
 };
 
 class css_frame_sync_impl : public css_frame_sync
@@ -35,20 +35,30 @@ private:
     int d_sf;
     double d_bw;
     int d_zero_padding_ratio;
-    int d_sample_num;       // Number of samples per non-padded symbol (2 * 2^sf)
+    int d_sample_num;       // Number of samples per non-padded symbol (2 * 2^sf for 2*BW sampling)
     int d_bin_num;          // Number of useful frequency bins (2^sf * zero_padding_ratio)
     int d_fft_len;          // FFT length (sample_num * zero_padding_ratio)
     std::vector<std::complex<float>> d_upchirp;   // Nominal upchirp (cfo=0)
     std::vector<std::complex<float>> d_downchirp; // Nominal downchirp (cfo=0)
-    std::shared_ptr<gr::fft::fft_complex_fwd> d_fft; // FFT object
+    std::shared_ptr<gr::fft::fft_complex_fwd> d_fft; // FFT object for frequency-domain correlation
+    bool d_debug;           // Flag to enable/disable debug output
+
     // State variables for synchronization
     sync_state_t d_state;
-    int64_t d_current_search_pos; // Absolute index in the stream
-    int d_preamble_bin;           // Peak bin index of the preamble upchirp (for CFO calc)
+    int64_t d_current_search_pos; // Absolute index in the stream where the current state's operation is centered or searching from
+    int d_preamble_bin;           // Peak bin index of the last preamble upchirp (used for CFO calc)
     double d_cfo;                 // Calculated Carrier Frequency Offset (Hz)
+
     // Helper function for dechirping and finding peak
-    // Returns (peak_magnitude, peak_bin_index_0_based)
+    // Applies conjugated nominal chirp, performs FFT, finds peak in combined magnitude spectrum.
+    // input_buffer: Pointer to the start of the complex input buffer.
+    // buffer_offset_in_buffer: The 0-based index within input_buffer where the symbol starts.
+    // is_up: True for upchirp dechirp, false for downchirp dechirp.
+    // Returns {peak_magnitude, peak_bin_index_0_based} in the range [0, d_bin_num - 1].
     std::pair<float, int> dechirp(const gr_complex *input_buffer, size_t buffer_offset_in_buffer, bool is_up);
+
+    // Debug helper
+    void print_complex_vector(const std::vector<gr_complex>& vec, const std::string& name, size_t max_print);
 
 public:
     css_frame_sync_impl(int sf, double bw, int zero_padding_ratio);

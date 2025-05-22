@@ -14,13 +14,15 @@
 #include <cmath>
 #include <numeric> // For std::accumulate
 #include <algorithm> // For std::max_element
-#include <cstdio> // For printf (debugging)
+#include <cstdio> // For printf/fprintf
 
 namespace gr {
 namespace cssmods {
 
 using input_type = gr_complex;
 using output_type = gr_complex;
+
+// Public factory function
 css_frame_sync::sptr css_frame_sync::make(int sf, double bw, int zero_padding_ratio)
 {
     return gnuradio::make_block_sptr<css_frame_sync_impl>(sf, bw, zero_padding_ratio);
@@ -39,48 +41,68 @@ css_frame_sync_impl::css_frame_sync_impl(int sf, double bw, int zero_padding_rat
         d_sf(sf),
         d_bw(bw),
         d_zero_padding_ratio(zero_padding_ratio),
-        d_sample_num(2 * (1 << sf)), // Corresponds to matlab self.sample_num
-        d_bin_num((1 << sf) * zero_padding_ratio), // Corresponds to matlab self.bin_num
-        d_fft_len(d_sample_num * zero_padding_ratio), // Corresponds to matlab self.fft_len
+        d_sample_num(2 * (1 << sf)), // Samples per symbol at 2*BW sampling rate
+        d_bin_num((1 << sf) * zero_padding_ratio), // Number of relevant bins after zero-padding
+        d_fft_len(d_sample_num * zero_padding_ratio), // FFT length including zero-padding
+        d_debug(true), // *** Initialize debug flag to true ***
         d_state(STATE_IDLE),
-        d_current_search_pos(0),
+        d_current_search_pos(0), // Absolute stream index
         d_preamble_bin(0),
         d_cfo(0.0)
 {
+    if (d_debug) {
+        fprintf(stderr, "css_frame_sync_impl: Initializing with SF=%d, BW=%f, ZPR=%d\n", d_sf, d_bw, d_zero_padding_ratio);
+        fprintf(stderr, "  Calculated: sample_num=%d, bin_num=%d, fft_len=%d\n", d_sample_num, d_bin_num, d_fft_len);
+    }
+
     // Initialize FFT object
     d_fft = std::make_shared<gr::fft::fft_complex_fwd>(d_fft_len); // false for forward FFT
+
     // Generate nominal chirps (cfo=0) based on the determined parameters
-    // fs = 2*bw, tdelta = (1 << sf) / bw, h_in=0, cfo=0, tscale=0
+    // LoRa chirps are typically generated with a bandwidth equal to the LoRa BW (d_bw),
+    // but sampled at a rate that yields d_sample_num samples over the nominal symbol duration.
+    // The nominal symbol duration is (1 << d_sf) / d_bw.
+    // So, the effective sampling rate for chirp generation is d_sample_num / ((1 << d_sf) / d_bw)
+    // = (2 * (1 << d_sf)) / ((1 << d_sf) / d_bw) = 2 * d_bw. This matches the common 2*BW sampling.
     double effective_fs_for_chirp_gen = 2.0 * d_bw;
-    double symbol_duration = (double)(1 << d_sf) / d_bw; // Nominal duration based on BW and SF
-    // Check if round(effective_fs_for_chirp_gen * symbol_duration) matches d_sample_num
-    // This should be round(2*bw * (2^sf)/bw) = round(2*2^sf) = 2*2^sf = d_sample_num
-    // This mapping seems consistent with the matlab sample_num definition.
+
     d_upchirp = generate_lora_chirp(
-        true, d_sf, d_bw, effective_fs_for_chirp_gen, 0, 0, symbol_duration, 0);
+        true, d_sf, d_bw, effective_fs_for_chirp_gen, 0, d_cfo, 0);
     d_downchirp = generate_lora_chirp(
-        false, d_sf, d_bw, effective_fs_for_chirp_gen, 0, 0, symbol_duration, 0);
-    if (d_upchirp.size() != (size_t)d_sample_num || d_downchirp.size() != (size_t)d_sample_num) {
-        fprintf(stderr, "Warning: Generated chirp length (%zu) does not match d_sample_num (%d).\n", d_upchirp.size(), d_sample_num);
-            // Handle error or adjust chirp generation parameters if possible
-            // For now, proceed but this indicates a potential mismatch in parameters
-            // Or the generate_lora_chirp needs to be adjusted.
-            // If sample_num comes from elsewhere (e.g. oversampling factor),
-            // then tdelta could be (1<<sf)/bw and fs = sample_num / tdelta.
-            // fs = (2*(1<<sf)) / ((1<<sf)/bw) = 2*bw. This confirms the 2*bw effective rate.
-    } else {
-        // Good, chirp length matches
+        false, d_sf, d_bw, effective_fs_for_chirp_gen, 0, d_cfo, 0);
+
+    if (d_debug) {
+        std::cout << "Generating LoRa chirps with parameters:" << std::endl;
+        std::cout << "  Spreading Factor (SF): " << d_sf << std::endl;
+        std::cout << "  Bandwidth (BW): " << d_bw << " Hz" << std::endl;
+        std::cout << "  Effective sample rate: " << effective_fs_for_chirp_gen << " Hz" << std::endl;
+        std::cout << "  Cfo: " << d_cfo << " seconds" << std::endl;
+        print_complex_vector(d_upchirp, "Raw d_upchirp", 100);
+        print_complex_vector(d_downchirp, "Raw d_downchirp", 100);
     }
-    // Set history to require enough data for the largest dechirp/sync step
-    // Sync involves looking back 4 symbols + current symbol = 5 symbols + refinement
-    // Let's set a history large enough for the CFO calculation step, which looks back 4 symbols
-    // plus the current symbol for dechirp. Total samples needed are around 5 * d_sample_num.
-    // However, work processes incrementally. The state machine handles spanning across calls.
-    // Let's set history = d_sample_num to ensure at least one symbol's worth of data
-    // is always available relative to the current processing point when needed.
-    // A larger history might be safer if data availability becomes an issue near boundaries.
-    // Let's use 5 * d_sample_num to be safe for the CFO calculation step within one call if possible.
+
+    if (d_debug) {
+        fprintf(stderr, "css_frame_sync_impl: Generated nominal chirps of length %zu.\n", d_upchirp.size());
+    }
+
+    if (d_upchirp.size() != (size_t)d_sample_num || d_downchirp.size() != (size_t)d_sample_num) {
+        // This indicates a potential mismatch in how sample_num is derived vs. generate_lora_chirp
+        // It might work if generate_lora_chirp internally handles the sample rate differently,
+        // but it's safer if they match. Based on the calculation above (2*BW sampling), they should match.
+        fprintf(stderr, "css_frame_sync_impl: Warning: Generated chirp length (%zu) does not match d_sample_num (%d). Parameter mismatch?\n", d_upchirp.size(), d_sample_num);
+    }
+
+    // Set history to require enough data for the largest look-back step.
+    // CFO calculation looks back 4 symbols (4 * d_sample_num) from the sync word start.
+    // To dechirp that symbol, we need d_sample_num samples starting at that historical position.
+    // So, the history needs to cover 4 * d_sample_num.
+    // A history of 5 * d_sample_num ensures that the start of the 4th symbol back
+    // (relative to the current symbol start) is always available within the history buffer
+    // when we are processing the symbol at d_current_search_pos.
     set_history(5 * d_sample_num);
+    if (d_debug) {
+        fprintf(stderr, "css_frame_sync_impl: History set to %zu samples.\n", this->history());
+    }
 }
 
 /*
@@ -89,49 +111,101 @@ css_frame_sync_impl::css_frame_sync_impl(int sf, double bw, int zero_padding_rat
 css_frame_sync_impl::~css_frame_sync_impl() {}
 
 
-// Dechirp helper function
+// Debug helper
+void css_frame_sync_impl::print_complex_vector(const std::vector<gr_complex>& vec, const std::string& name, size_t max_print = 10) 
+{
+    if (!d_debug) return;
+    
+    std::cout << "----- " << name << " (size=" << vec.size() << ") -----" << std::endl;
+    
+    size_t print_count = std::min(max_print, vec.size());
+    for (size_t i = 0; i < print_count; ++i) {
+        std::cout << "[" << i << "]: " << vec[i].real() << " + " << vec[i].imag() << "j" << std::endl;
+    }
+    
+    if (vec.size() > max_print) {
+        std::cout << "... (showing first " << max_print << " of " << vec.size() << " elements)" << std::endl;
+    }
+    
+    std::cout << "------------------------" << std::endl;
+}
+
+
+
+// Dechirp helper function: Apply conjugated nominal chirp, perform FFT, find peak
 std::pair<float, int>
 css_frame_sync_impl::dechirp(const gr_complex *input_buffer, size_t buffer_offset_in_buffer, bool is_up)
 {
-    // Need d_sample_num samples starting at input_buffer + buffer_offset_in_buffer
-    // Need d_fft_len samples for FFT input
+    // Need d_sample_num samples from the input buffer starting at buffer_offset_in_buffer
+    // for the dechirping step.
+    // The result is then zero-padded to d_fft_len for the FFT.
+
+    // Check if the buffer offset and required samples are valid within the input buffer
+    // This check relies on the caller (work) ensuring that buffer_offset_in_buffer + d_sample_num
+    // does not exceed the bounds of the provided input_buffer segment.
+    // In work, the input_buffer can be the start of the current input chunk (`in`)
+    // or the start of the history buffer (`in - this->history() + d_sample_num`).
+    // The offset is calculated relative to whichever pointer is passed.
+    // Assuming the caller ensures enough data is available from the given input_buffer start.
+
     std::vector<gr_complex> dechirped_symbol(d_sample_num);
-    std::vector<gr_complex> fft_input(d_fft_len, 0); // Padded with zeros
-    // Check if enough data is available in the buffer from the offset
-    // This check should ideally happen *before* calling dechirp from work,
-    // but adding a safeguard here.
-    // The data needed is input_buffer[buffer_offset_in_buffer ... buffer_offset_in_buffer + d_sample_num - 1]
-    // The size of the available buffer relative to input_buffer start is not known here.
-    // Assume the caller (work) guarantees buffer_offset_in_buffer + d_sample_num <= total_items_in_buffer
-    // This assumption is okay if work checks bounds correctly using nitems_read(0) and ninput_items[0].
-    const std::vector<gr_complex>& chirp_to_use = is_up ? d_upchirp : d_downchirp;
-    // Apply dechirping and copy to FFT input
-    for (int i = 0; i < d_sample_num; ++i) {
-        // Access input data at offset + i
-        dechirped_symbol[i] = input_buffer[buffer_offset_in_buffer + i] * std::conj(chirp_to_use[i]);
+
+    memcpy(dechirped_symbol.data(), 
+           input_buffer + buffer_offset_in_buffer, 
+           d_sample_num * sizeof(gr_complex));
+    if (d_debug) {
+        std::cout << "===== DEBUG: Input Data Copy =====" << std::endl;
+        std::cout << "Copied " << d_sample_num << " samples from offset " 
+                  << buffer_offset_in_buffer << std::endl;
+        std::cout << "First sample: " << dechirped_symbol[0].real() << " + " 
+                  << dechirped_symbol[0].imag() << "j" << std::endl;
+        std::cout << "Last sample: " << dechirped_symbol.back().real() << " + " 
+                  << dechirped_symbol.back().imag() << "j" << std::endl;
+        std::cout << "================================" << std::endl;
     }
+    
+    // Use a vector for FFT input which will be zero-padded
+    std::vector<gr_complex> fft_input(d_fft_len, 0); // Automatically initialized to zeros
+
+    const std::vector<gr_complex>& chirp_to_use = is_up ? d_upchirp : d_downchirp;
+
+    // Apply dechirping (complex multiplication with conjugate chirp)
+    // Use VOLK for optimized multiplication if available
+    volk_32fc_x2_multiply_conjugate_32fc(dechirped_symbol.data(), 
+                                        dechirped_symbol.data(), 
+                                        chirp_to_use.data(), 
+                                        d_sample_num);
+
     // Copy dechirped signal into FFT input buffer (first d_sample_num points)
-    memcpy(fft_input.data(), dechirped_symbol.data(), d_sample_num * sizeof(gr_complex));
-    // FFT output buffer
-    std::vector<gr_complex> fft_output(d_fft_len);
+    // The remaining points in fft_input (from d_sample_num to d_fft_len-1) remain zero (zero-padding)
+    std::copy(dechirped_symbol.begin(), dechirped_symbol.end(), fft_input.begin());
+
     // Execute FFT
-    // 1. 将输入数据复制到 FFT 的输入缓冲区
-    memcpy(d_fft->get_inbuf(), fft_input.data(), d_fft_len * sizeof(gr_complex));
-    // 2. 执行 FFT
+    // 1. Copy input data to FFT's input buffer
+    gr_complex* fft_in = d_fft->get_inbuf();
+    memcpy(fft_in, fft_input.data(), d_fft_len * sizeof(gr_complex));
+    // 2. Execute FFT
     d_fft->execute();
-    // 3. 从 FFT 的输出缓冲区获取结果
-    memcpy(fft_output.data(), d_fft->get_outbuf(), d_fft_len * sizeof(gr_complex));
+    // 3. Get result from FFT's output buffer
+    // Note: Direct access to outbuf is common, but copying to a vector is also fine
+    // std::vector<gr_complex> fft_output(d_fft_len);
+    // memcpy(fft_output.data(), d_fft->get_outbuf(), d_fft_len * sizeof(gr_complex));
+    const gr_complex* fft_output = d_fft->get_outbuf(); // Access output directly
+
     // Calculate combined magnitude spectrum (corresponding to matlab abs(ft(1:bin_num)) + abs(ft(fft_len-bin_num+1:fft_len)))
+    // This combines the positive and negative frequency components for a given bin offset due to cyclic property of chirps.
     std::vector<float> combined_mag(d_bin_num);
     for (int i = 0; i < d_bin_num; ++i) {
-        // In C++ (0-indexed): ft[0...bin_num-1] and ft[fft_len-bin_num ... fft_len-1]
+        // In C++ (0-indexed): fft_output[0...bin_num-1] and fft_output[fft_len-bin_num ... fft_len-1]
+        // The corresponding bins are i and fft_len - 1 - i for 0-based indexing.
         combined_mag[i] = std::abs(fft_output[i]) + std::abs(fft_output[d_fft_len - 1 - i]);
     }
+
     // Find the peak in the combined magnitude spectrum
-    // std::max_element returns an iterator to the max element
     auto max_it = std::max_element(combined_mag.begin(), combined_mag.end());
     float peak_mag = *max_it;
-    int peak_idx_0_based = std::distance(combined_mag.begin(), max_it); // 0-based index
+    int peak_idx_0_based = std::distance(combined_mag.begin(), max_it); // 0-based index in combined_mag [0, d_bin_num-1]
+
     // Return (magnitude, 0-based index)
     return {peak_mag, peak_idx_0_based};
 }
@@ -142,224 +216,367 @@ int css_frame_sync_impl::work(int noutput_items,
 {
     const gr_complex *in = (const gr_complex *) input_items[0];
     gr_complex *out = (gr_complex *) output_items[0];
+
     // Copy input to output immediately, as this is a pass-through block with tags
     memcpy(out, in, noutput_items * sizeof(gr_complex));
+
     // Get the absolute index of the first item in the current input buffer
     int64_t abs_read_pos = nitems_read(0);
     // Calculate the absolute index of the last item in the current input buffer
     int64_t abs_end_pos = abs_read_pos + noutput_items;
+
+    if (d_debug) {
+        fprintf(stderr, "css_frame_sync_impl::work: Processing %d items. Absolute range [%ld, %ld).\n",
+                noutput_items, abs_read_pos, abs_end_pos);
+        fprintf(stderr, "  Current state: %d, Search position: %ld\n", d_state, d_current_search_pos);
+    }
+
+
     // Process data based on the current state
-    while (d_state != STATE_SYNC_COMPLETE) { // Stay in the loop as long as we are actively syncing
-        // Calculate the required data start position in the current buffer
-        int64_t required_start_in_buffer = d_current_search_pos - abs_read_pos;
-        int required_samples = 0; // Samples needed for the current state's operation
+    // Stay in the loop as long as we are actively syncing AND have enough data
+    // for the current state's *minimum* operation.
+    // The data availability checks within each state handle needing more than the minimum.
+    while (d_state != STATE_SYNC_COMPLETE) {
+
+        int64_t current_abs_pos = d_current_search_pos; // Position state is focused on
+
+        // Calculate the start index within the *current* input buffer for the required data.
+        // This is relative to the start of the buffer `in` (abs_read_pos).
+        // If required_start_abs < abs_read_pos, the data is in history.
+        // If required_start_abs + required_samples > abs_end_pos, not enough data in current buffer.
+
         switch (d_state) {
             case STATE_IDLE:
-                // Start searching from d_current_search_pos (0 initially)
+                if (d_debug) {
+                    fprintf(stderr, "css_frame_sync_impl::work: State IDLE. Transitioning to SEARCHING_DOWNCHIRP.\n");
+                }
                 d_state = STATE_SEARCHING_DOWNCHIRP;
-                // Fallthrough to searching state logic
-            // [[fallthrough]]; // C++17 attribute, or use break and separate logic
+                // No break, fallthrough or re-evaluate loop condition to process new state
+
             case STATE_SEARCHING_DOWNCHIRP: {
-                // Need d_sample_num samples for dechirp
-                required_samples = d_sample_num;
-                // Check if we have enough data in the buffer to perform a dechirp step
-                // The search processes in steps of d_sample_num
+                // Need d_sample_num samples for dechirping a symbol.
+                // The search proceeds in steps of d_sample_num.
+                // d_current_search_pos holds the absolute index of the symbol start we are currently checking.
+
                 while (d_current_search_pos + d_sample_num <= abs_end_pos) {
-                    // Check if the *start* of the symbol is within the current buffer
+                    // We have enough data *from the current search position* within the current buffer.
                     int64_t current_symbol_start_in_buffer = d_current_search_pos - abs_read_pos;
-                    if (current_symbol_start_in_buffer < 0) {
-                        // This case shouldn't happen if we're careful with d_current_search_pos updates
-                        // and buffer boundary checks. But for robustness: advance search pos
-                        // to the start of the current buffer and try again.
-                        d_current_search_pos = abs_read_pos;
-                        current_symbol_start_in_buffer = 0;
-                        // Re-check if enough data from the new start pos
-                        if (d_current_search_pos + d_sample_num > abs_end_pos) {
-                            // Not enough data even from the buffer start, break search loop
-                            break;
-                        }
+
+                    // Ensure the symbol we want to check actually starts within or after the current buffer start.
+                    // If d_current_search_pos was before abs_read_pos, we need to jump the search forward
+                    // to the start of the current buffer, unless that position is within history.
+                    // However, the typical flow is that d_current_search_pos advances.
+                    // If it's < 0, it means the block started late, or history wasn't enough previously.
+                    // For search, we only search forward from the start of the *current* buffer chunk.
+                    // If d_current_search_pos is before abs_read_pos, we should update it to abs_read_pos
+                    // to avoid processing old data/relying on history for the search phase.
+                    if (d_current_search_pos < abs_read_pos) {
+                         if (d_debug) {
+                            fprintf(stderr, "css_frame_sync_impl::work: State SEARCHING_DOWNCHIRP. Search position %ld is before buffer start %ld. Adjusting search start to buffer start.\n",
+                                d_current_search_pos, abs_read_pos);
+                         }
+                         d_current_search_pos = abs_read_pos;
+                         current_symbol_start_in_buffer = 0;
+                         // Re-check if enough data from the new start pos
+                         if (d_current_search_pos + d_sample_num > abs_end_pos) {
+                             // Not enough data even from the buffer start, break search loop
+                             if (d_debug) {
+                                fprintf(stderr, "css_frame_sync_impl::work: State SEARCHING_DOWNCHIRP. Not enough data (%ld < %d) even from buffer start %ld. Waiting for more data.\n",
+                                        abs_end_pos - d_current_search_pos, d_sample_num, d_current_search_pos);
+                             }
+                             break; // Exit while loop, return noutput_items
+                         }
                     }
-                    // Perform dechirp
+
+                    // Perform dechirp on the symbol at d_current_search_pos
                     std::pair<float, int> up_peak = dechirp(in, current_symbol_start_in_buffer, true);
                     std::pair<float, int> down_peak = dechirp(in, current_symbol_start_in_buffer, false);
-                    // Check for downchirp detection (matlab: abs(down_peak(1)) > abs(up_peak(1)))
+
+                    if (d_debug) {
+                        fprintf(stderr, "css_frame_sync_impl::work: State SEARCHING_DOWNCHIRP. Checking abs_pos %ld (buffer_offset %ld). Up peak: (mag=%.2f, bin=%d), Down peak: (mag=%.2f, bin=%d).\n",
+                                d_current_search_pos, current_symbol_start_in_buffer, up_peak.first, up_peak.second, down_peak.first, down_peak.second);
+                    }
+
+                    // Check for downchirp detection (simple magnitude comparison)
                     if (std::abs(down_peak.first) > std::abs(up_peak.first)) {
-                        // Downchirp potentially found
-                        // d_current_search_pos already points to the start of this downchirp symbol
+                        // Downchirp potentially found. d_current_search_pos is the start of this symbol.
+                        if (d_debug) {
+                            fprintf(stderr, "css_frame_sync_impl::work: State SEARCHING_DOWNCHIRP. Potential downchirp found at abs_pos: %ld. Transitioning to REFINING_POSITION.\n", d_current_search_pos);
+                        }
                         d_state = STATE_REFINING_POSITION;
-                        // fprintf(stderr, "Found potential downchirp at abs_pos: %ld\n", d_current_search_pos);
                         goto next_state_processing; // Exit search loop and process the refinement state
                     }
+
                     // Move to the next symbol position to search
                     d_current_search_pos += d_sample_num;
                 }
-                // If the loop finished without finding (i.e., ran out of buffer)
-                // We have processed up to the end of the last full symbol within the buffer
-                // d_current_search_pos is already updated to the start of the next symbol to check
-                // We are done with this buffer chunk for searching.
+
+                // If the loop finished without finding a downchirp, it means we ran out of data
+                // in the current buffer chunk. d_current_search_pos is already updated
+                // to the start of the next symbol to check in the *next* work call.
+                if (d_debug) {
+                     fprintf(stderr, "css_frame_sync_impl::work: State SEARCHING_DOWNCHIRP. Ran out of data in buffer [%ld, %ld) before finding downchirp. Next search starts at %ld. Waiting for more data.\n",
+                             abs_read_pos, abs_end_pos, d_current_search_pos);
+                }
                 return noutput_items; // Consume all input, state and search pos are saved
             next_state_processing:; // Label to jump to if state changes
             } break; // End of STATE_SEARCHING_DOWNCHIRP case
+
+
             case STATE_REFINING_POSITION: {
-                // Needs d_sample_num samples starting at d_current_search_pos
-                required_samples = d_sample_num;
-                required_start_in_buffer = d_current_search_pos - abs_read_pos;
+                // Needs d_sample_num samples starting at d_current_search_pos (the potential downchirp start)
+                int64_t symbol_start_abs = d_current_search_pos;
+                int required_samples = d_sample_num;
+                int64_t required_start_in_buffer = symbol_start_abs - abs_read_pos; // Offset from 'in'
+
+                std::pair<float, int> pkd;
                 if (required_start_in_buffer < 0 || required_start_in_buffer + required_samples > noutput_items) {
-                    // Not enough data in the current buffer for refinement
-                    // d_current_search_pos needs to be adjusted to the start of the current buffer
-                    // if it was before the buffer start, then wait for next call.
-                    // The state implies d_current_search_pos is set correctly from the previous state.
-                    // So, just check if enough *remaining* data is in the buffer.
-                    return noutput_items; // Consume all input, state and search pos are saved
+                    // Not enough data *starting from d_current_search_pos* in the current buffer.
+                    // This state implies d_current_search_pos was just set based on finding a symbol start.
+                    // If that start is before the current buffer start, we need history.
+                    // If the *entire* symbol needed is not within the current buffer [abs_read_pos, abs_end_pos)
+                    // or within the history buffer accessible relative to the current buffer start, we wait.
+                    // `in` points to abs_read_pos. Accessible data goes back `this->history() - d_sample_num` samples
+                    // before `in`. So, the earliest accessible absolute position is `abs_read_pos - (this->history() - d_sample_num)`.
+                    // The latest accessible position relative to the *start* of the buffer `in` is `noutput_items + (this->history() - d_sample_num) - 1`.
+                    // required_start_in_buffer is the offset from `in`. So it must be within `[-(this->history() - d_sample_num), noutput_items - required_samples)`.
+                    if (required_start_in_buffer < -(int64_t)(this->history() - d_sample_num) || required_start_in_buffer + required_samples > (int64_t)noutput_items + (this->history() - d_sample_num) - (this->history() - d_sample_num) ) { // simplified check against current buffer + history size
+                         if (d_debug) {
+                             fprintf(stderr, "css_frame_sync_impl::work: State REFINING_POSITION. Not enough data for symbol at abs_pos %ld. Required buffer start offset %ld (from buffer start %ld), needed %d samples. Buffer range [%ld, %ld). History size %zu. Waiting for more data.\n",
+                                     symbol_start_abs, required_start_in_buffer, abs_read_pos, required_samples, abs_read_pos, abs_end_pos, this->history());
+                         }
+                         return noutput_items; // Consume all input, state and search pos are saved
+                    }
+
+                    // Data is available, potentially in history. Adjust pointer and offset.
+                    const gr_complex *in_ptr = in - (this->history() - d_sample_num);
+                    size_t buffer_offset_adjusted = required_start_in_buffer + (this->history() - d_sample_num);
+
+                    if (d_debug) {
+                         fprintf(stderr, "css_frame_sync_impl::work: State REFINING_POSITION. Data for symbol at abs_pos %ld available in history. Dechirping...\n", symbol_start_abs);
+                    }
+                    pkd = dechirp(in_ptr, buffer_offset_adjusted, false);
+                    if (d_debug) {
+                         fprintf(stderr, "  Refinement dechirp peak: (mag=%.2f, bin=%d)\n", pkd.first, pkd.second);
+                    }
+
+
+                } else { // Data is fully within the current buffer (from abs_read_pos)
+                     if (d_debug) {
+                         fprintf(stderr, "css_frame_sync_impl::work: State REFINING_POSITION. Data for symbol at abs_pos %ld fully in buffer. Dechirping...\n", symbol_start_abs);
+                    }
+                    pkd = dechirp(in, required_start_in_buffer, false);
+                    if (d_debug) {
+                         fprintf(stderr, "  Refinement dechirp peak: (mag=%.2f, bin=%d)\n", pkd.first, pkd.second);
+                    }
                 }
-                // Perform dechirp on the found downchirp symbol
-                std::pair<float, int> pkd = dechirp(in, required_start_in_buffer, false);
+
                 // Calculate fine timing offset 'to' (matlab: pkd(2) is 1-based index)
-                // C++ pkd.second is 0-based index
-                int to;
-                if (pkd.second >= d_bin_num / 2) { // Note: matlab used >, C++ uses >= for 0-based
-                    to = round((float)(pkd.second - d_bin_num) / d_zero_padding_ratio);
+                // C++ pkd.second is 0-based index [0, d_bin_num-1]
+                // The peak bin represents a fractional symbol offset.
+                // The mapping from bin index to time offset is approximately bin * (symbol_duration / fft_len)
+                // which simplifies to bin / (BW * zero_padding_ratio).
+                // Relative to d_sample_num samples, the offset in samples is bin * (d_sample_num / fft_len)
+                // = bin / zero_padding_ratio.
+                // The peak can appear in bin [0, d_bin_num-1]. Bin d_bin_num/2 corresponds to 0 offset.
+                // Bins > d_bin_num/2 wrap around to negative offsets.
+                int to; // Offset in samples
+                if (pkd.second >= d_bin_num / 2) { // Note: matlab used >, C++ uses >= for 0-based comparison
+                    // Peak in upper half corresponds to negative time offset
+                    to = (pkd.second - d_bin_num) / d_zero_padding_ratio; // Convert bin index to sample offset
                 } else {
-                    to = round((float)pkd.second / d_zero_padding_ratio);
+                    // Peak in lower half corresponds to positive time offset
+                    to = pkd.second / d_zero_padding_ratio; // Convert bin index to sample offset
                 }
-                // Apply the offset to the current search position
-                d_current_search_pos += to;
-                // fprintf(stderr, "Refined position to abs_pos: %ld (offset %d)\n", d_current_search_pos, to);
+                 // Round the sample offset for integer sample positioning
+                 to = round((float)to);
+
+                // Apply the calculated sample offset to the current search position
+                d_current_search_pos = symbol_start_abs + to; // Update based on original position + offset
+
+                if (d_debug) {
+                    fprintf(stderr, "css_frame_sync_impl::work: State REFINING_POSITION. Calculated fine timing offset: %d samples. Refined sync symbol start absolute position: %ld. Transitioning to CFO_CALCULATING.\n",
+                            to, d_current_search_pos);
+                }
+
                 d_state = STATE_CFO_CALCULATING;
                 // Continue to next state's processing within this work call if possible
             } break; // End of STATE_REFINING_POSITION case
+
+
             case STATE_CFO_CALCULATING: {
-                // Needs d_sample_num samples starting at d_current_search_pos - 4*d_sample_num
-                // This is the start of the last preamble symbol before the sync word
+                // Needs d_sample_num samples starting at d_current_search_pos - 4*d_sample_num.
+                // This is the estimated start of the last preamble symbol before the sync word.
                 int64_t preamble_start_abs = d_current_search_pos - 4LL * d_sample_num;
-                required_samples = d_sample_num;
-                required_start_in_buffer = preamble_start_abs - abs_read_pos;
-                if (required_start_in_buffer < 0 || required_start_in_buffer + required_samples > noutput_items) {
-                    // Not enough data in the current buffer for CFO calculation
-                    // The needed data is *before* the current d_current_search_pos.
-                    // If the required data is not in the *current* buffer starting at abs_read_pos,
-                    // it means it was in previous buffers and is no longer accessible unless history is large enough.
-                    // We set history, but maybe not enough if the initial search pos was very late.
-                    // If required_start_in_buffer is negative, the data is before the current buffer start.
-                    // This indicates a problem with history or initial search position being too far into the stream.
-                    // For simplicity, we assume history guarantees this data is available relative to d_current_search_pos.
-                    // So required_start_in_buffer should be >= -history + d_sample_num.
-                    // Let's just check if required_start_in_buffer + required_samples is within [0, noutput_items].
-                    if (required_start_in_buffer < -((int64_t)this->history() - d_sample_num) || required_start_in_buffer + required_samples > noutput_items - (this->history() - d_sample_num)) {
-                        // Not enough history or data in the current buffer.
-                        // This state might not be reachable with insufficient history.
-                        // If we reach here, it implies data needed is before current buffer AND before history.
-                        // This case should be rare with adequate history.
-                        // Let's just consume available data and wait.
-                        fprintf(stderr, "CFO calculation data not available. Required buffer start: %ld, history: %zu\n", required_start_in_buffer, this->history());
-                            return noutput_items; // Consume all input, state and search pos are saved
-                    }
-                    // Adjust input pointer to the actual start of accessible history data
-                    // The dechirp function takes offset from the buffer start (in this case, history start)
-                    const gr_complex *in_history = in - (this->history() - d_sample_num);
-                    required_start_in_buffer += (this->history() - d_sample_num); // Offset from history start
-                    std::pair<float, int> pku = dechirp(in_history, required_start_in_buffer, true);
-                    d_preamble_bin = pku.second; // 0-based index
-                    // fprintf(stderr, "CFO calculation data available. Required buffer start (adjusted): %ld\n", required_start_in_buffer);
-                } else { // Data is fully within the current buffer (from abs_read_pos)
-                    std::pair<float, int> pku = dechirp(in, required_start_in_buffer, true);
-                    d_preamble_bin = pku.second; // 0-based index
-                    // fprintf(stderr, "CFO calculation data fully in buffer. Required buffer start: %ld\n", required_start_in_buffer);
+                int required_samples = d_sample_num;
+                int64_t required_start_in_buffer = preamble_start_abs - abs_read_pos; // Offset from 'in'
+
+                // Check if required data is available within buffer + history
+                // Accessible range relative to 'in': [-(this->history() - d_sample_num), noutput_items + (this->history() - d_sample_num) -1 ]
+                // Required range relative to 'in': [required_start_in_buffer, required_start_in_buffer + required_samples - 1]
+                if (required_start_in_buffer < -(int64_t)(this->history() - d_sample_num) || required_start_in_buffer + required_samples > (int64_t)noutput_items + (this->history() - d_sample_num) - (this->history() - d_sample_num)) {
+                     if (d_debug) {
+                          fprintf(stderr, "css_frame_sync_impl::work: State CFO_CALCULATING. Data for preamble symbol at abs_pos %ld not available (before history or too far back in history). Required buffer start offset %ld (from buffer start %ld), needed %d samples. Buffer range [%ld, %ld). History size %zu. Waiting for more data.\n",
+                                preamble_start_abs, required_start_in_buffer, abs_read_pos, required_samples, abs_read_pos, abs_end_pos, this->history());
+                     }
+                     // Not enough history or data in the current buffer.
+                     return noutput_items; // Consume all input, state and search pos are saved
                 }
-                // Calculate CFO (matlab: preamble_bin is 1-based)
-                // C++ d_preamble_bin is 0-based
-                if (d_preamble_bin >= d_bin_num / 2) { // Note: matlab used >, C++ uses >= for 0-based index
-                    d_cfo = (double)(d_preamble_bin - d_bin_num) * d_bw / d_bin_num;
+
+                // Data is available, potentially in history. Adjust pointer and offset.
+                const gr_complex *in_ptr = in - (this->history() - d_sample_num);
+                size_t buffer_offset_adjusted = required_start_in_buffer + (this->history() - d_sample_num);
+
+                if (d_debug) {
+                    fprintf(stderr, "css_frame_sync_impl::work: State CFO_CALCULATING. Data for preamble symbol at abs_pos %ld available (adjusted buffer offset %zu). Dechirping upchirp...\n",
+                            preamble_start_abs, buffer_offset_adjusted);
+                }
+                std::pair<float, int> pku = dechirp(in_ptr, buffer_offset_adjusted, true);
+                d_preamble_bin = pku.second; // 0-based index in [0, d_bin_num-1]
+
+                if (d_debug) {
+                     fprintf(stderr, "  CFO dechirp peak: (mag=%.2f, bin=%d)\n", pku.first, d_preamble_bin);
+                }
+
+                // Calculate CFO (matlab: preamble_bin is 1-based [1, d_bin_num])
+                // C++ d_preamble_bin is 0-based [0, d_bin_num-1]
+                // CFO = (bin_offset / bin_num) * BW
+                // Bin offset relative to center (d_bin_num/2):
+                // If bin >= d_bin_num/2, offset is bin - d_bin_num (wraps around)
+                // If bin < d_bin_num/2, offset is bin
+                double bin_offset;
+                if (d_preamble_bin >= d_bin_num / 2) {
+                    bin_offset = (double)(d_preamble_bin - d_bin_num);
                 } else {
-                    d_cfo = (double)d_preamble_bin * d_bw / d_bin_num;
+                    bin_offset = (double)d_preamble_bin;
                 }
-                // fprintf(stderr, "Calculated CFO: %f Hz (Preamble bin: %d)\n", d_cfo, d_preamble_bin);
+                d_cfo = bin_offset * d_bw / d_bin_num;
+
+                if (d_debug) {
+                    fprintf(stderr, "css_frame_sync_impl::work: State CFO_CALCULATING. Calculated CFO: %f Hz (Preamble bin: %d). Transitioning to PAYLOAD_START_CALCULATING.\n",
+                            d_cfo, d_preamble_bin);
+                }
+
                 d_state = STATE_PAYLOAD_START_CALCULATING;
                 // Continue to next state's processing within this work call if possible
             } break; // End of STATE_CFO_CALCULATING case
+
+
             case STATE_PAYLOAD_START_CALCULATING: {
-                // Needs d_sample_num samples starting at d_current_search_pos - d_sample_num
-                // This is the symbol just before the refined sync word start
+                // Needs d_sample_num samples starting at d_current_search_pos - d_sample_num.
+                // This is the symbol just before the refined sync word start (either last preamble up or first sync down).
                 int64_t symbol_before_sync_start_abs = d_current_search_pos - (long long)d_sample_num;
-                required_samples = d_sample_num;
-                required_start_in_buffer = symbol_before_sync_start_abs - abs_read_pos;
-                std::pair<float, int> pku, pkd;
-                if (required_start_in_buffer < 0 || required_start_in_buffer + required_samples > noutput_items) {
-                    // Not enough data in the current buffer for this step
-                    // Similar data availability check as CFO calculation
-                    // If data needed is before current buffer AND before history:
-                    if (required_start_in_buffer < -((int64_t)this->history() - d_sample_num) || required_start_in_buffer + required_samples > noutput_items - (this->history() - d_sample_num)) {
-                            fprintf(stderr, "Payload start data not available. Required buffer start: %ld, history: %zu\n", required_start_in_buffer, this->history());
-                            return noutput_items; // Consume all input, state and search pos are saved
-                    }
-                    // Adjust input pointer to history start if needed
-                    const gr_complex *in_history = in - (this->history() - d_sample_num);
-                    required_start_in_buffer += (this->history() - d_sample_num); // Offset from history start
-                    pku = dechirp(in_history, required_start_in_buffer, true);
-                    pkd = dechirp(in_history, required_start_in_buffer, false);
-                    // fprintf(stderr, "Payload start data available (adjusted). Required buffer start: %ld\n", required_start_in_buffer);
-                } else { // Data is fully within the current buffer
-                    pku = dechirp(in, required_start_in_buffer, true);
-                    pkd = dechirp(in, required_start_in_buffer, false);
-                    // fprintf(stderr, "Payload start data fully in buffer. Required buffer start: %ld\n", required_start_in_buffer);
+                int required_samples = d_sample_num;
+                int64_t required_start_in_buffer = symbol_before_sync_start_abs - abs_read_pos; // Offset from 'in'
+
+                // Check if required data is available within buffer + history
+                if (required_start_in_buffer < -(int64_t)(this->history() - d_sample_num) || required_start_in_buffer + required_samples > (int64_t)noutput_items + (this->history() - d_sample_num) - (this->history() - d_sample_num)) {
+                     if (d_debug) {
+                         fprintf(stderr, "css_frame_sync_impl::work: State PAYLOAD_START_CALCULATING. Data for symbol before sync at abs_pos %ld not available (before history or too far back in history). Required buffer start offset %ld (from buffer start %ld), needed %d samples. Buffer range [%ld, %ld). History size %zu. Waiting for more data.\n",
+                                 symbol_before_sync_start_abs, required_start_in_buffer, abs_read_pos, required_samples, abs_read_pos, abs_end_pos, this->history());
+                     }
+                     return noutput_items; // Consume all input, state and search pos are saved
                 }
+
+                // Data is available, potentially in history. Adjust pointer and offset.
+                const gr_complex *in_ptr = in - (this->history() - d_sample_num);
+                size_t buffer_offset_adjusted = required_start_in_buffer + (this->history() - d_sample_num);
+
+                if (d_debug) {
+                    fprintf(stderr, "css_frame_sync_impl::work: State PAYLOAD_START_CALCULATING. Data for symbol before sync word at abs_pos %ld available (adjusted buffer offset %zu). Dechirping up/down...\n",
+                             symbol_before_sync_start_abs, buffer_offset_adjusted);
+                }
+                std::pair<float, int> pku = dechirp(in_ptr, buffer_offset_adjusted, true);
+                std::pair<float, int> pkd = dechirp(in_ptr, buffer_offset_adjusted, false);
+
+                if (d_debug) {
+                    fprintf(stderr, "  Symbol before sync dechirp peaks: Up (mag=%.2f, bin=%d), Down (mag=%.2f, bin=%d)\n",
+                            pku.first, pku.second, pkd.first, pkd.second);
+                }
+
                 // Determine payload start index x_sync (matlab logic)
-                int64_t x_sync;
+                // d_current_search_pos is the refined start of the detected sync downchirp.
+                // The symbol at (d_current_search_pos - d_sample_num) is the one *before* it.
+                // If that symbol is UP, then d_current_search_pos must be the start of the *first* sync DOWN.
+                // Frame structure: Preamble (8 Up) -> Sync Word (2 Down) -> Header/Payload (starts 2.25 sym after sync word start).
+                // If d_current_search_pos is the start of 1st DOWN, payload starts at:
+                // d_current_search_pos (start of 1st DOWN) + d_sample_num (1st DOWN) + d_sample_num (2nd DOWN) + 2.25 * d_sample_num (header/payload offset)
+                // = d_current_search_pos + 4.25 * d_sample_num? No, matlab is 2.25*d_sample_num.
+                // Let's re-read the matlab code comments or documentation.
+                // The LoRa standard specifies 8 preamble upchirps + 2 sync downchirps.
+                // The header/payload starts 2.25 symbols AFTER the start of the *sync word*.
+                // The sync word starts with the *first* downchirp.
+                // So, Payload Start = (Start of 1st Sync Down) + 2.25 * d_sample_num.
+                // The refinement step `d_current_search_pos += to;` sets `d_current_search_pos` to the refined start of the *detected* downchirp.
+                // If the symbol before it is UP, then `d_current_search_pos` *is* the start of the 1st sync DOWN.
+                // Payload Start = `d_current_search_pos + round(2.25 * d_sample_num)` -> This matches the matlab logic!
+                // If the symbol before it is DOWN, then `d_current_search_pos` must be the start of the *second* sync DOWN.
+                // This implies the refinement landed slightly late.
+                // The start of the 1st sync DOWN would be `d_current_search_pos - d_sample_num`.
+                // Payload Start = (Start of 1st Sync Down) + 2.25 * d_sample_num
+                // = (`d_current_search_pos - d_sample_num`) + 2.25 * d_sample_num
+                // = `d_current_search_pos + 1.25 * d_sample_num`. -> This also matches the matlab logic!
+                // The logic correctly calculates the payload start relative to the refined start of the *detected* downchirp,
+                // adjusting based on whether the detected downchirp was the first or second sync symbol.
+
+                int64_t x_sync; // Absolute index for payload start
+
                 if (std::abs(pku.first) > std::abs(pkd.first)) {
-                    // Current symbol (at d_current_search_pos - d_sample_num) is upchirp (preamble)
-                    // This means d_current_search_pos is the start of the *first* downchirp
+                    // The symbol at (d_current_search_pos - d_sample_num) was an UPCHIRP (last preamble)
+                    // This means d_current_search_pos is the refined start of the *first* sync DOWNCHIRP.
                     x_sync = d_current_search_pos + round(2.25 * d_sample_num);
+                    if (d_debug) {
+                        fprintf(stderr, "  Symbol before sync was UP. d_current_search_pos (%ld) is start of 1st sync DOWN. Payload start calc: %ld + round(2.25 * %d) = %ld.\n",
+                                d_current_search_pos, d_current_search_pos, d_sample_num, x_sync);
+                    }
                 } else {
-                    // Current symbol is downchirp (first sync word downchirp)
-                    // This means d_current_search_pos is the start of the *second* downchirp
+                    // The symbol at (d_current_search_pos - d_sample_num) was a DOWNCHIRP (first sync down)
+                    // This means d_current_search_pos is the refined start of the *second* sync DOWNCHIRP.
                     x_sync = d_current_search_pos + round(1.25 * d_sample_num);
+                    if (d_debug) {
+                         fprintf(stderr, "  Symbol before sync was DOWN. d_current_search_pos (%ld) is start of 2nd sync DOWN. Payload start calc: %ld + round(1.25 * %d) = %ld.\n",
+                                d_current_search_pos, d_current_search_pos, d_sample_num, x_sync);
+                    }
                 }
-                // Add tag at the payload start position
-                int64_t tag_offset_in_buffer = x_sync - abs_read_pos;
-                if (tag_offset_in_buffer >= 0 && tag_offset_in_buffer < noutput_items) {
-                    // Tag is within the current output buffer chunk
-                    this->add_item_tag(0, // Port 0
-                                        tag_offset_in_buffer, // Offset in *output* buffer
-                                        pmt::string_to_symbol("payload_start"), // Tag key
-                                        pmt::make_dict()); // Tag value (can add info here)
-                    fprintf(stderr, "!!!!! LoRa Frame Sync Found! Tag added at absolute position %ld (buffer offset %ld) !!!!!\n", x_sync, tag_offset_in_buffer);
+
+                // Add tag at the calculated payload start position (absolute stream index)
+                // Tagging with absolute position is generally more robust in GNU Radio.
+                this->add_item_tag(0, // Port 0
+                                   x_sync, // Absolute offset in *output* stream
+                                   pmt::string_to_symbol("payload_start"), // Tag key
+                                   pmt::make_dict()); // Tag value (can add CFO, SF, BW etc. here)
+
+                if (d_debug) {
+                     fprintf(stderr, "css_frame_sync_impl::work: !!!!! LoRa Frame Sync Found! Tag added at absolute position %ld. Calculated CFO: %f Hz. !!!!!\n", x_sync, d_cfo);
                 } else {
-                    // Tag position is outside the current buffer.
-                    // This can happen if x_sync is far beyond the current buffer end,
-                    // or before the current buffer start (but history should cover it for processing).
-                    // If x_sync is beyond the current buffer, the tag will be added in a future call
-                    // when that index falls within the buffer processed by work.
-                    // If x_sync is before the current buffer, it means we found sync late,
-                    // but the tag position is still valid relative to the total stream.
-                    // The tag system should handle this when that index range is produced.
-                    // So, we don't add the tag *now*, but the state should track the absolute tag pos if needed.
-                    // For simplicity, just print a warning.
-                    fprintf(stderr, "Warning: Calculated tag position %ld is outside current buffer range [%ld, %ld). Tag will be added later.\n", x_sync, abs_read_pos, abs_end_pos);
-                        // Although add_item_tag documentation suggests it handles offsets relative to nitems_read(0),
-                        // it's safest if the offset is within [0, noutput_items).
-                        // Let's rely on GNU Radio's tag propagation if it's outside the current chunk.
-                        // The tag system usually works with absolute stream positions.
-                        // Let's try adding the tag with the absolute position instead of relative buffer offset.
-                        this->add_item_tag(0, // Port 0
-                                            x_sync, // Absolute offset in *output* stream
-                                            pmt::string_to_symbol("payload_start"), // Tag key
-                                            pmt::make_dict()); // Tag value
-                        fprintf(stderr, "!!!!! LoRa Frame Sync Found! Tag added at absolute position %ld !!!!!\n", x_sync);
-                        // This might be the correct way for absolute tagging.
+                     // Always print the final sync message, even if debug is off
+                     fprintf(stderr, "!!!!! css_frame_sync: Frame Sync Found! Tag added at absolute position %ld. !!!!!\n", x_sync);
                 }
+
+
                 d_state = STATE_SYNC_COMPLETE; // Synchronization is complete for this frame
-                // No break here, let the loop check the state and potentially exit
+                // No break needed, loop condition will be false and loop will exit
             } break; // End of STATE_PAYLOAD_START_CALCULATING case
+
             case STATE_SYNC_COMPLETE:
-                // We are done. Just pass data through. The loop will exit.
-                break;
+                // We are done. Just pass data through. The loop will exit on the next iteration check.
+                 if (d_debug) {
+                     fprintf(stderr, "css_frame_sync_impl::work: State SYNC_COMPLETE. Passing data through.\n");
+                 }
+                break; // Exit switch, loop condition will be checked
         }
-        // If we reached here without returning, it means a state transition happened,
-        // and we should try processing the next state with potentially the same buffer data.
-        // The state machine continues processing until it runs out of data for the current step
-        // or reaches STATE_SYNC_COMPLETE.
+         // If we reached here AND the state is not SYNC_COMPLETE,
+         // it means a state transition occurred and there might be enough
+         // data in the current buffer to immediately process the next state.
+         // The while loop condition re-checks the state and continues if possible.
+         // If not enough data was available for the *current* state's operation,
+         // the code would have already returned noutput_items inside the state block.
     }
+
     // Return the number of items consumed and produced (1:1 block)
+     if (d_debug) {
+        fprintf(stderr, "css_frame_sync_impl::work: Work finished. Returning %d items.\n", noutput_items);
+     }
     return noutput_items;
 }
 
