@@ -39,11 +39,9 @@ private:
 
     // State variables
     bool d_decoding_active;
-    int d_preamble_bin_ref; // Reference bin from preamble (via tag)
-    std::vector<gr_complex> d_symbol_candidate_buffer;
-    int d_samples_in_buffer;
-    bool d_output_tag_pending;
-    pmt::pmt_t d_pending_tag_dict;
+    int64_t d_current_search_pos; // Absolute index in the stream where the current state's operation is centered or searching from
+    int d_preamble_bin;           // Peak bin index of the last preamble upchirp (used for CFO calc)
+    double d_cfo;                 // Calculated Carrier Frequency Offset (Hz)
 
     bool d_debug; // For debug prints
 

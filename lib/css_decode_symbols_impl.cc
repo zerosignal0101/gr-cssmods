@@ -34,9 +34,8 @@ css_decode_symbols_impl::css_decode_symbols_impl(int sf,
       d_bin_num((1 << sf) * zero_padding_ratio),
       d_fft_len(d_sample_num * zero_padding_ratio),
       d_decoding_active(false),
-      d_preamble_bin_ref(-1),
-      d_samples_in_buffer(0),
-      d_output_tag_pending(false),
+      d_current_search_pos(0), // Absolute stream index
+      d_preamble_bin(-1),
       d_debug(true) // Set to true for debug output, or make it a parameter
 {
     if (d_debug) {
@@ -58,12 +57,10 @@ css_decode_symbols_impl::css_decode_symbols_impl(int sf,
         print_complex_vector(d_upchirp, "Decoder d_upchirp", 16);
     }
 
-    d_symbol_candidate_buffer.resize(d_sample_num);
-    // No set_history needed if we process sample by sample and buffer internally.
-    // Or, set_history(d_sample_num) if we want to ensure a full symbol can be grabbed if a tag appears mid-buffer.
-    // The current work logic buffers internally, so history isn't strictly for assembly,
-    // but for tag alignment, it's good not to have too large history. Default is 0.
-    // Let's keep history minimal or 0 and rely on internal buffering.
+    set_history(1 * d_sample_num);
+    if (d_debug) {
+        fprintf(stderr, "css_decode_symbols_impl: History set to %zu samples.\n", this->history());
+    }
 }
 
 /*
@@ -91,133 +88,110 @@ int css_decode_symbols_impl::general_work(int noutput_items,
 {
     const gr_complex* in_ptr = (const gr_complex*)input_items[0];
     unsigned char* out_ptr = (unsigned char*)output_items[0];
-    int consumed_count = 0;
     int produced_count = 0;
-    uint64_t abs_input_offset = nitems_read(0);
-    // Iterate through all available input items, or until we decide to stop
-    // (e.g., output buffer is full, or no input available).
-    for (int i = 0; i < ninput_items[0]; ++i) {
-        uint64_t current_abs_pos = abs_input_offset + i;
-        std::vector<gr::tag_t> tags;
-        // Check tags only for the current item
-        get_tags_in_window(tags, 0, current_abs_pos, current_abs_pos + 1);
-        for (const auto& tag : tags) {
-            if (tag.key == pmt::string_to_symbol("payload_start")) {
-                if (d_debug) {
-                    fprintf(stderr, "css_decode_symbols_impl: Received 'payload_start' tag at abs_pos %lu (input idx %d).\n", current_abs_pos, i);
-                }
-                d_decoding_active = true;
-                d_samples_in_buffer = 0; // Reset buffer for new frame (start collecting samples *after* this tag)
-                d_output_tag_pending = false; // Assume tag is invalid until verified
-                d_preamble_bin_ref = -1; // Reset
-                if (pmt::is_dict(tag.value)) {
-                    d_preamble_bin_ref = pmt::to_long(pmt::dict_ref(tag.value, pmt::string_to_symbol("preamble_bin"), pmt::from_long(-1)));
-                    if (d_preamble_bin_ref == -1) {
-                        if (d_debug) {
-                            fprintf(stderr, "css_decode_symbols_impl: Error: 'payload_start' tag missing valid 'preamble_bin'. Disabling decoding for this frame.\n");
-                        }
-                        d_decoding_active = false; // Disable decoding if tag is bad
-                    } else {
-                        if (d_debug) {
-                            fprintf(stderr, "  Extracted preamble_bin_ref: %d\n", d_preamble_bin_ref);
-                        }
-                        d_output_tag_pending = true; // Tag is valid, prepare to propagate
-                        d_pending_tag_dict = tag.value; // Copy dictionary
+    uint64_t abs_read_pos = nitems_read(0);
+    size_t current_buffer_length = ninput_items[0];
+    uint64_t abs_end_pos = abs_read_pos + current_buffer_length;
+
+    std::vector<tag_t> tags;
+    if (d_debug) {
+        fprintf(stderr, "css_decode_symbols_impl: Search tags from %lu (input idx %d).\n", abs_read_pos, current_buffer_length);
+    }
+    get_tags_in_window(tags, 0, 0, current_buffer_length);
+    for (const auto &tag : tags) {
+        if (d_debug) {
+            fprintf(stderr, "css_decode_symbols_impl: Received '%s' tag at abs_pos %lu (input idx %d).\n", pmt::symbol_to_string(tag.key), nitems_read(0), ninput_items[0]);
+        }
+    }
+
+    for (const auto& tag : tags) {
+        // if (d_debug) {
+        //     fprintf(stderr, "css_decode_symbols_impl: Received '%s' tag at abs_pos %lu (input idx %d).\n", pmt::symbol_to_string(tag.key), nitems_read(0), ninput_items[0]);
+        // }
+        if (tag.key == pmt::string_to_symbol("payload_start")) {
+            if (d_debug) {
+                fprintf(stderr, "css_decode_symbols_impl: Received 'payload_start' tag at abs_pos %lu (input idx %d).\n", nitems_read(0), ninput_items[0]);
+            }
+            d_decoding_active = true;
+            d_preamble_bin = -1; // Reset
+
+            if (d_debug) {
+                fprintf(stderr, "css_decode_symbols_impl:Get tag offset %ld (Buffer start idx %ld).\n", tag.offset, abs_read_pos);
+            }
+
+            add_item_tag(0, // port
+                    nitems_written(0) + produced_count, // abs offset on output stream
+                    pmt::string_to_symbol("payload_start"),
+                    pmt::make_dict());
+        
+            if (d_debug) {
+                fprintf(stderr, "  css_decode_symbols_impl: Current search pos update from %ld to tag offset: %ld\n",
+                        d_current_search_pos, tag.offset);
+            }
+
+            d_current_search_pos = tag.offset;
+
+            if (pmt::is_dict(tag.value)) {
+                d_preamble_bin = pmt::to_long(pmt::dict_ref(tag.value, pmt::string_to_symbol("preamble_bin"), pmt::from_long(-1)));
+                if (d_preamble_bin == -1) {
+                    if (d_debug) {
+                        fprintf(stderr, "css_decode_symbols_impl: Error: 'payload_start' tag missing valid 'preamble_bin'. Use zero for demodulate afterwards\n");
                     }
+                    // d_decoding_active = false; // Disable decoding if tag is bad
+                    d_preamble_bin = 0;
                 } else {
                     if (d_debug) {
-                        fprintf(stderr, "css_decode_symbols_impl: Error: 'payload_start' tag value is not a dictionary. Disabling decoding.\n");
-                    }
-                    d_decoding_active = false;
-                }
-            }
-             // Add handling for other relevant tags (e.g., frame_end if needed)
-        }
-        // --- Process the current sample (in_ptr[i]) ---
-        if (d_decoding_active) {
-            // Check if adding this sample would complete a symbol AND the output buffer is full.
-            // We check against d_sample_num - 1 because d_samples_in_buffer hasn't been incremented yet.
-            if (d_samples_in_buffer == d_sample_num - 1 && produced_count >= noutput_items) {
-                // Adding this sample would complete a symbol, but we have no space to output it.
-                // Do *not* consume this sample (in_ptr[i]) in this call.
-                if (d_debug) {
-                     fprintf(stderr, "Decoder: Output buffer full (%d items), cannot complete symbol with sample %d. Stopping processing input.\n", noutput_items, i);
-                }
-                consumed_count = i; // We have consumed samples 0 through i-1. Sample i remains.
-                goto end_work_loop; // Break out of the for loop
-            }
-            // If we reached here, we can safely add sample i to the buffer.
-            d_symbol_candidate_buffer[d_samples_in_buffer++] = in_ptr[i];
-            // Increment consumed_count *after* successfully processing/buffering the sample
-            consumed_count++;
-            // Check if symbol is now complete *after* adding sample i
-            if (d_samples_in_buffer == d_sample_num) {
-                // A full symbol is collected. Attempt to produce output.
-                // We know output space is available because of the check above (produced_count < noutput_items).
-                // If we get here, produced_count was < noutput_items *before* processing sample i.
-                // It might be == noutput_items *now* after processing sample i and incrementing produced_count,
-                // but that's okay, we produced *one* item.
-                if (d_output_tag_pending) {
-                    add_item_tag(0, // port
-                                 nitems_written(0) + produced_count, // abs offset on output stream
-                                 pmt::string_to_symbol("payload_start"),
-                                 d_pending_tag_dict);
-                    d_output_tag_pending = false; // Tag is propagated for this frame's first symbol
-                    if (d_debug) {
-                        fprintf(stderr, "  Added 'payload_start' tag to output at output_item_idx %lu.\n", nitems_written(0) + produced_count);
+                        fprintf(stderr, "  Extracted preamble_bin_ref: %d\n", d_preamble_bin);
                     }
                 }
-                // Dechirp the collected symbol (payload symbols are typically upchirps)
-                std::pair<float, int> peak_info = dechirp(
-                    d_symbol_candidate_buffer.data(), 0, true, // Pass true for upchirp dechirp if payload is upchirp based
-                    d_sample_num, d_fft, d_fft_len, d_bin_num,
-                    d_upchirp, d_downchirp); // Note: you use both chirps in generate_lora_chirp, ensure dechirp uses correct one
-                int current_symbol_peak_bin = peak_info.second; // 0-based
-                // Symbol calculation (ensure positive result before modulo for robustness)
-                // (current_symbol_peak_bin - d_preamble_bin_ref) is the offset from the reference
-                // Add d_bin_num before modulo to ensure positive result
-                double raw_symbol_val = static_cast<double>(current_symbol_peak_bin - d_preamble_bin_ref);
-                 // Adjust for wrap-around if peak is below preamble ref
-                 if (raw_symbol_val < 0) {
-                     raw_symbol_val += d_bin_num;
-                 }
-                int symbol_value = static_cast<int>(round(raw_symbol_val / d_zero_padding_ratio)) % (1 << d_sf);
-                 // Ensure positive modulo result if round() results in a negative value before adding d_bin_num (less likely with the raw_symbol_val adjustment)
-                 // The previous calculation `(static_cast<double>(current_symbol_peak_bin - d_preamble_bin_ref + d_bin_num)) / d_zero_padding_ratio` is also a common way and ensures positive intermediate before division. Let's stick to that one as it seems intended.
-                 // Revert symbol calculation to original but ensure modulo is positive:
-                 raw_symbol_val = (static_cast<double>(current_symbol_peak_bin - d_preamble_bin_ref + d_bin_num)); // Intermediate might be large but positive
-                 symbol_value = static_cast<int>(round(raw_symbol_val / d_zero_padding_ratio));
-                 symbol_value = symbol_value % (1 << d_sf); // Apply modulo
-                 if (symbol_value < 0) { // Ensure positive result of modulo
-                     symbol_value += (1 << d_sf);
-                 }
-                out_ptr[produced_count++] = static_cast<unsigned char>(symbol_value);
+                d_cfo = pmt::to_double(pmt::dict_ref(tag.value, pmt::string_to_symbol("cfo"), pmt::from_double(0.0)));
+                // d_sf d_bw can also be assessed from tag dict. TODO
+            } else {
                 if (d_debug) {
-                    fprintf(stderr, "  Decoded symbol %d: input_idx range [%d, %d], peak_bin=%d, preamble_ref=%d, val_calc_raw=%.2f, final_val=%d (Mag: %.2f)\n",
-                            produced_count - 1, i - d_sample_num + 1, i, current_symbol_peak_bin, d_preamble_bin_ref, raw_symbol_val, symbol_value, peak_info.first);
+                    fprintf(stderr, "css_decode_symbols_impl: Error: 'payload_start' tag value is not a dictionary. Disabling decoding.\n");
                 }
-                d_samples_in_buffer = 0; // Reset for next symbol
-                // Note: No need to check produced_count >= noutput_items here after producing.
-                // The outer loop condition or the 'goto' check before adding the sample handles it.
-            } // End if symbol complete
-        } else {
-            // Not decoding. Just consume the sample without buffering.
-            // Increment consumed_count for this sample.
-            consumed_count++;
+                d_decoding_active = false;
+            }
         }
-    } // End of for loop (i)
-end_work_loop: // Label for goto
-    // This debug message was misleading. Replace it with a general status message.
-    // if (d_debug) {
-    //     fprintf(stderr, "  Decoded symbol: No tag found from %ld to %ld, consumed %d\n",
-    //             abs_input_offset, abs_input_offset + ninput_items[0], consumed_count);
-    // }
+        // Add handling for other relevant tags (e.g., frame_end if needed)
+    }
+    // --- Process the current sample (in_ptr[i]) ---
+    if (d_decoding_active) {
+        while (d_current_search_pos + d_sample_num <= abs_end_pos) {
+            int64_t required_start_in_buffer = d_current_search_pos - abs_read_pos; // Offset from 'in'
+            // Dechirp the collected symbol (payload symbols are typically upchirps)
+            std::pair<float, int> peak_info = dechirp(
+                in_ptr, required_start_in_buffer, true, // Pass true for upchirp dechirp if payload is upchirp based
+                d_sample_num, d_fft, d_fft_len, d_bin_num,
+                d_upchirp, d_downchirp); // Note: you use both chirps in generate_lora_chirp, ensure dechirp uses correct one
+            int symbol_value = (int(round((peak_info.second + d_bin_num - d_preamble_bin) / (double)d_zero_padding_ratio))) % (1 << d_sf);
+            // // Ensure positive modulo result if round() results in a negative value before adding d_bin_num (less likely with the raw_symbol_val adjustment)
+            // // The previous calculation `(static_cast<double>(current_symbol_peak_bin - d_preamble_bin_ref + d_bin_num)) / d_zero_padding_ratio` is also a common way and ensures positive intermediate before division. Let's stick to that one as it seems intended.
+            // // Revert symbol calculation to original but ensure modulo is positive:
+            // raw_symbol_val = (static_cast<double>(current_symbol_peak_bin - d_preamble_bin + d_bin_num)); // Intermediate might be large but positive
+            // symbol_value = static_cast<int>(round(raw_symbol_val / d_zero_padding_ratio));
+            // symbol_value = symbol_value % (1 << d_sf); // Apply modulo
+            // if (symbol_value < 0) { // Ensure positive result of modulo
+            //     symbol_value += (1 << d_sf);
+            // }
+            out_ptr[produced_count++] = static_cast<unsigned char>(symbol_value);
+            if (d_debug) {
+                fprintf(stderr, "  Decoded symbol %d: input_idx range [%d, %d), read pos %ld, peak_bin=%d, preamble_ref=%d, val_calc_raw=%d (Mag: %.2f)\n",
+                        produced_count - 1, d_current_search_pos, d_current_search_pos + d_sample_num, required_start_in_buffer, peak_info.second, d_preamble_bin, symbol_value, peak_info.first);
+            }
+            d_current_search_pos += d_sample_num;
+        }
+        if (d_debug) {
+        fprintf(stderr, "Decoder: Symbol extract done. Produced %d items (avail: %d). Current pos %ld < %ld end buffer. Decoding: %s.\n",
+                produced_count, noutput_items, d_current_search_pos, abs_end_pos, d_decoding_active ? "Yes" : "No");
+        }
+    } 
     if (d_debug) {
-        fprintf(stderr, "Decoder: Work done. Consumed %d input items (avail: %d), Produced %d items (avail: %d). Buffer size: %d/%d. Decoding: %s.\n",
-                consumed_count, ninput_items[0], produced_count, noutput_items, d_samples_in_buffer, d_sample_num, d_decoding_active ? "Yes" : "No");
+        fprintf(stderr, "Decoder: Work done. Consumed %d input items (avail: %d), Produced %d items (avail: %d). Decoding: %s.\n",
+                current_buffer_length, current_buffer_length, produced_count, noutput_items, d_decoding_active ? "Yes" : "No");
     }
     // This consumes the samples that were successfully processed within the loop (up to consumed_count).
-    consume(0, consumed_count);
+    consume(0, current_buffer_length);
     // Return the number of output items produced in this call.
     return produced_count;
 }

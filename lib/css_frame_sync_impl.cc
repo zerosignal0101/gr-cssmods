@@ -203,7 +203,7 @@ dechirp(const gr_complex *input_buffer, int64_t buffer_offset_in_buffer, bool is
     memcpy(dechirped_symbol.data(), 
            input_buffer + buffer_offset_in_buffer, 
            sample_num * sizeof(gr_complex));
-    
+
     // Use a vector for FFT input which will be zero-padded
     std::vector<gr_complex> fft_input(fft_len, 0); // Automatically initialized to zeros
 
@@ -640,16 +640,25 @@ int css_frame_sync_impl::work(int noutput_items,
                 pmt::dict_add(payload_dict, pmt::string_to_symbol("sf"), pmt::from_long(d_sf));
                 pmt::dict_add(payload_dict, pmt::string_to_symbol("bw"), pmt::from_double(d_bw));
 
+                // fprintf(stderr, "[DEBUG] Adding payload_start tag at absolute position %ld with values:\n", x_sync);
+                // fprintf(stderr, "  preamble_bin: %ld (0-based)\n", d_preamble_bin);
+                // fprintf(stderr, "  cfo: %.3f\n", d_cfo);
+                // fprintf(stderr, "  sf: %ld\n", d_sf);
+                // fprintf(stderr, "  bw: %.1f\n", d_bw);
+
+                int64_t x_sync_output = nitems_written(0) + x_sync - abs_read_pos;
+                
                 this->add_item_tag(0, // Port 0
-                                x_sync, // Absolute offset in *output* stream
+                                x_sync_output, // Absolute offset in *output* stream
                                 pmt::string_to_symbol("payload_start"), // Tag key
                                 payload_dict); // Tag value
 
                 if (d_debug) {
-                     fprintf(stderr, "css_frame_sync_impl::work: !!!!! LoRa Frame Sync Found! Tag added at absolute position %ld. Calculated CFO: %f Hz. !!!!!\n", x_sync, d_cfo);
+                     fprintf(stderr, "css_frame_sync_impl::work: !!!!! LoRa Frame Sync Found! Tag added at absolute position %ld (input %ld). Calculated CFO: %f Hz. !!!!!\n", x_sync_output, x_sync, d_cfo);
                 } else {
                      // Always print the final sync message, even if debug is off
-                     fprintf(stderr, "!!!!! css_frame_sync: Frame Sync Found! Tag added at absolute position %ld. !!!!!\n", x_sync);
+                     fprintf(stderr, "!!!!! css_frame_sync: Frame Sync Found! Tag added at absolute position %ld. !!!!!\n Last preamble_bin: %ld (0-based), cfo calculated: %.3f\n"
+                        , x_sync_output, d_preamble_bin, d_cfo);
                 }
 
                 d_current_search_pos = x_sync;
@@ -657,7 +666,7 @@ int css_frame_sync_impl::work(int noutput_items,
                 d_state = STATE_SYNC_COMPLETE; // Synchronization is complete for this frame
                 // No break needed, loop condition will be false and loop will exit
 
-                if (d_debug) {
+                if (true) {
                     // Net id debug
                     int64_t symbol_start_abs = d_current_search_pos - (17 * d_sample_num / 4);
                     required_start_in_buffer = symbol_start_abs - abs_read_pos;
@@ -669,6 +678,11 @@ int css_frame_sync_impl::work(int noutput_items,
                     int netid_1 = (int(round((pk_netid_1.second + d_bin_num - d_preamble_bin) / (double)d_zero_padding_ratio))) % (1 << d_sf);
                     int netid_2 = (int(round((pk_netid_2.second + d_bin_num - d_preamble_bin) / (double)d_zero_padding_ratio))) % (1 << d_sf);
                     fprintf(stderr, "css_frame_sync_impl::work: Net id calculated:  %d, %d. !!!!!\n", netid_1, netid_2);
+                    symbol_start_abs = d_current_search_pos;
+                    required_start_in_buffer = symbol_start_abs - abs_read_pos;
+                    std::pair<float, int> pk_payload_1 = dechirp(in, required_start_in_buffer, true, d_sample_num, d_fft, d_fft_len, d_bin_num, d_upchirp, d_downchirp);
+                    int payload_symbol_1 = (int(round((pk_payload_1.second + d_bin_num - d_preamble_bin) / (double)d_zero_padding_ratio))) % (1 << d_sf);
+                    fprintf(stderr, "css_frame_sync_impl::work: Payload symbol 1 calculated:  %d (from abs pos %ld, %ld). !!!!!\n", payload_symbol_1, symbol_start_abs, symbol_start_abs + d_sample_num);
                 }
             } break; // End of STATE_PAYLOAD_START_CALCULATING case
 
