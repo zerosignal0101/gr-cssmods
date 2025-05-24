@@ -79,8 +79,8 @@ css_frame_sync_impl::css_frame_sync_impl(int sf, double bw, int zero_padding_rat
         std::cout << "  Bandwidth (BW): " << d_bw << " Hz" << std::endl;
         std::cout << "  Effective sample rate: " << effective_fs_for_chirp_gen << " Hz" << std::endl;
         std::cout << "  Cfo: " << d_cfo << " seconds" << std::endl;
-        print_complex_vector(d_upchirp, "Raw d_upchirp", 100);
-        print_complex_vector(d_downchirp, "Raw d_downchirp", 100);
+        print_complex_vector(d_upchirp, "Raw d_upchirp", 256);
+        print_complex_vector(d_downchirp, "Raw d_downchirp", 256);
     }
 
     if (d_debug) {
@@ -113,17 +113,67 @@ css_frame_sync_impl::css_frame_sync_impl(int sf, double bw, int zero_padding_rat
 css_frame_sync_impl::~css_frame_sync_impl() {}
 
 
-// Debug helper
-void css_frame_sync_impl::print_complex_vector(const std::vector<gr_complex>& vec, const std::string& name, size_t max_print = 10) 
+void css_frame_sync_impl::print_complex_vector(const std::vector<gr_complex>& vec, 
+                                              const std::string& name, 
+                                              size_t max_print = 10) 
 {
     if (!d_debug) return;
     
     std::cout << "----- " << name << " (size=" << vec.size() << ") -----" << std::endl;
     
+    // 输出MATLAB格式的复数数组
+    std::cout << "MATLAB format: [";
     size_t print_count = std::min(max_print, vec.size());
     for (size_t i = 0; i < print_count; ++i) {
-        std::cout << "[" << i << "]: " << vec[i].real() << " + " << vec[i].imag() << "j" << std::endl;
+        // 输出实部和虚部，用"+"或"-"连接，末尾加"i"（MATLAB格式）
+        std::cout << vec[i].real() 
+                 << ((vec[i].imag() >= 0) ? "+" : "")  // 处理正负号
+                 << vec[i].imag() << "i";
+        
+        // 最后一个元素后不加逗号
+        if (i < print_count - 1) {
+            std::cout << ", ";
+        }
     }
+    
+    if (vec.size() > max_print) {
+        std::cout << ", ...";  // 提示还有更多元素
+    }
+    
+    std::cout << "]" << std::endl;
+    
+    if (vec.size() > max_print) {
+        std::cout << "... (showing first " << max_print << " of " << vec.size() << " elements)" << std::endl;
+    }
+    
+    std::cout << "------------------------" << std::endl;
+}
+
+
+
+void css_frame_sync_impl::print_float_vector(const std::vector<float>& vec, 
+                                           const std::string& name, 
+                                           size_t max_print) 
+{
+    if (!d_debug) return;
+    
+    std::cout << "----- " << name << " (size=" << vec.size() << ") -----" << std::endl;
+    
+    // 输出 MATLAB 格式的浮点数组
+    std::cout << "MATLAB format: [";
+    size_t print_count = std::min(max_print, vec.size());
+    for (size_t i = 0; i < print_count; ++i) {
+        std::cout << vec[i];
+        if (i < print_count - 1) {
+            std::cout << ", ";  // 元素间用逗号分隔
+        }
+    }
+    
+    if (vec.size() > max_print) {
+        std::cout << ", ...";  // 提示数据被截断
+    }
+    
+    std::cout << "]" << std::endl;
     
     if (vec.size() > max_print) {
         std::cout << "... (showing first " << max_print << " of " << vec.size() << " elements)" << std::endl;
@@ -150,7 +200,7 @@ css_frame_sync_impl::dechirp(const gr_complex *input_buffer, int64_t buffer_offs
     // The offset is calculated relative to whichever pointer is passed.
     // Assuming the caller ensures enough data is available from the given input_buffer start.
 
-    std::vector<gr_complex> dechirped_symbol(d_sample_num);
+    std::vector<gr_complex> dechirped_symbol(d_sample_num, 0);
 
     memcpy(dechirped_symbol.data(), 
            input_buffer + buffer_offset_in_buffer, 
@@ -182,6 +232,8 @@ css_frame_sync_impl::dechirp(const gr_complex *input_buffer, int64_t buffer_offs
     // The remaining points in fft_input (from d_sample_num to d_fft_len-1) remain zero (zero-padding)
     std::copy(dechirped_symbol.begin(), dechirped_symbol.end(), fft_input.begin());
 
+    // print_complex_vector(fft_input, "FFT input (after zero-padding)", d_sample_num);
+
     // Execute FFT
     // 1. Copy input data to FFT's input buffer
     gr_complex* fft_in = d_fft->get_inbuf();
@@ -202,6 +254,7 @@ css_frame_sync_impl::dechirp(const gr_complex *input_buffer, int64_t buffer_offs
         // The corresponding bins are i and fft_len - 1 - i for 0-based indexing.
         combined_mag[i] = std::abs(fft_output[i]) + std::abs(fft_output[d_fft_len - 1 - i]);
     }
+    // print_float_vector(combined_mag, "Combine Mag", d_bin_num);
 
     // Find the peak in the combined magnitude spectrum
     auto max_it = std::max_element(combined_mag.begin(), combined_mag.end());
@@ -432,12 +485,10 @@ int css_frame_sync_impl::work(int noutput_items,
                 int required_samples = d_sample_num;
                 int64_t required_start_in_buffer = symbol_start_abs - abs_read_pos; // Offset from 'in'
 
-                std::pair<float, int> pkd;
-                
                 if (d_debug) {
                     fprintf(stderr, "css_frame_sync_impl::work: State REFINING_POSITION. Data for symbol at abs_pos %ld fully in buffer. Dechirping...\n", symbol_start_abs);
                 }
-                pkd = dechirp(in, required_start_in_buffer, false);
+                std::pair<float, int> pkd = dechirp(in, required_start_in_buffer, false);
                 if (d_debug) {
                         fprintf(stderr, "  Refinement dechirp peak: (mag=%.2f, bin=%d)\n", pkd.first, pkd.second);
                 }
@@ -451,23 +502,31 @@ int css_frame_sync_impl::work(int noutput_items,
                 // = bin / zero_padding_ratio.
                 // The peak can appear in bin [0, d_bin_num-1]. Bin d_bin_num/2 corresponds to 0 offset.
                 // Bins > d_bin_num/2 wrap around to negative offsets.
-                int to; // Offset in samples
+                float to; // Offset in samples
                 if (pkd.second >= d_bin_num / 2) { // Note: matlab used >, C++ uses >= for 0-based comparison
+                    if (d_debug) {
+                        fprintf(stderr, "css_frame_sync_impl::work: State REFINING_POSITION. PKD.second larger than d_bin_num / 2: %d > %d \n",
+                                pkd.second, d_bin_num / 2);
+                    }
                     // Peak in upper half corresponds to negative time offset
-                    to = (pkd.second - d_bin_num) / d_zero_padding_ratio; // Convert bin index to sample offset
+                    to = float(pkd.second - d_bin_num) / d_zero_padding_ratio; // Convert bin index to sample offset
                 } else {
+                    if (d_debug) {
+                        fprintf(stderr, "css_frame_sync_impl::work: State REFINING_POSITION. PKD.second smaller than d_bin_num / 2: %d <= %d \n",
+                                pkd.second, d_bin_num / 2);
+                    }
                     // Peak in lower half corresponds to positive time offset
-                    to = pkd.second / d_zero_padding_ratio; // Convert bin index to sample offset
+                    to = float(pkd.second) / d_zero_padding_ratio; // Convert bin index to sample offset
                 }
                 // Round the sample offset for integer sample positioning
-                to = round((float)to);
+                int sto_move_delta = round(to); 
 
                 // Apply the calculated sample offset to the current search position
-                d_current_search_pos = symbol_start_abs + to; // Update based on original position + offset
+                d_current_search_pos = symbol_start_abs + sto_move_delta; // Update based on original position + offset
 
                 if (d_debug) {
                     fprintf(stderr, "css_frame_sync_impl::work: State REFINING_POSITION. Calculated fine timing offset: %d samples. Refined sync symbol start absolute position: %ld. Transitioning to CFO_CALCULATING.\n",
-                            to, d_current_search_pos);
+                            sto_move_delta, d_current_search_pos);
                 }
 
                 d_state = STATE_CFO_CALCULATING;
@@ -493,7 +552,7 @@ int css_frame_sync_impl::work(int noutput_items,
                 }
 
                 if (d_debug) {
-                    fprintf(stderr, "css_frame_sync_impl::work: State CFO_CALCULATING. Data for preamble symbol at abs_pos %ld available (adjusted buffer offset %zu). Dechirping upchirp...\n",
+                    fprintf(stderr, "css_frame_sync_impl::work: State CFO_CALCULATING. Data for preamble symbol at abs_pos %ld available (adjusted buffer offset %ld). Dechirping upchirp...\n",
                             preamble_start_abs, required_start_in_buffer);
                 }
                 std::pair<float, int> pku = dechirp(in, required_start_in_buffer, true);
@@ -544,7 +603,7 @@ int css_frame_sync_impl::work(int noutput_items,
                 }
 
                 if (d_debug) {
-                    fprintf(stderr, "css_frame_sync_impl::work: State PAYLOAD_START_CALCULATING. Data for symbol before sync word at abs_pos %ld available (adjusted buffer offset %zu). Dechirping up/down...\n",
+                    fprintf(stderr, "css_frame_sync_impl::work: State PAYLOAD_START_CALCULATING. Data for symbol before sync word at abs_pos %ld available (adjusted buffer offset %ld). Dechirping up/down...\n",
                              symbol_before_sync_start_abs, required_start_in_buffer);
                 }
                 std::pair<float, int> pku = dechirp(in, required_start_in_buffer, true);
@@ -628,8 +687,8 @@ int css_frame_sync_impl::work(int noutput_items,
                     required_start_in_buffer = symbol_start_abs - abs_read_pos;
                     std::pair<float, int> pk_netid_2 = dechirp(in, required_start_in_buffer, true);
                     // Net id calc
-                    int netid_1 = ((pk_netid_1.second + d_bin_num - d_preamble_bin) / d_zero_padding_ratio) % (1 << d_sf);
-                    int netid_2 = ((pk_netid_2.second + d_bin_num - d_preamble_bin) / d_zero_padding_ratio) % (1 << d_sf);
+                    int netid_1 = (int(round((pk_netid_1.second + d_bin_num - d_preamble_bin) / (double)d_zero_padding_ratio))) % (1 << d_sf);
+                    int netid_2 = (int(round((pk_netid_2.second + d_bin_num - d_preamble_bin) / (double)d_zero_padding_ratio))) % (1 << d_sf);
                     fprintf(stderr, "css_frame_sync_impl::work: Net id calculated:  %d, %d. !!!!!\n", netid_1, netid_2);
                 }
             } break; // End of STATE_PAYLOAD_START_CALCULATING case

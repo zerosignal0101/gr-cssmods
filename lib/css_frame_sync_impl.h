@@ -62,6 +62,7 @@ private:
 
     // Debug helper
     void print_complex_vector(const std::vector<gr_complex>& vec, const std::string& name, size_t max_print);
+    void print_float_vector(const std::vector<float>& vec, const std::string& name, size_t max_print = 10);
 
 public:
     css_frame_sync_impl(int sf, double bw, int zero_padding_ratio);
