@@ -113,12 +113,10 @@ css_frame_sync_impl::css_frame_sync_impl(int sf, double bw, int zero_padding_rat
 css_frame_sync_impl::~css_frame_sync_impl() {}
 
 
-void css_frame_sync_impl::print_complex_vector(const std::vector<gr_complex>& vec, 
+void print_complex_vector(const std::vector<gr_complex>& vec, 
                                               const std::string& name, 
                                               size_t max_print = 10) 
 {
-    if (!d_debug) return;
-    
     std::cout << "----- " << name << " (size=" << vec.size() << ") -----" << std::endl;
     
     // 输出MATLAB格式的复数数组
@@ -151,12 +149,10 @@ void css_frame_sync_impl::print_complex_vector(const std::vector<gr_complex>& ve
 
 
 
-void css_frame_sync_impl::print_float_vector(const std::vector<float>& vec, 
+void print_float_vector(const std::vector<float>& vec, 
                                            const std::string& name, 
                                            size_t max_print) 
 {
-    if (!d_debug) return;
-    
     std::cout << "----- " << name << " (size=" << vec.size() << ") -----" << std::endl;
     
     // 输出 MATLAB 格式的浮点数组
@@ -186,80 +182,72 @@ void css_frame_sync_impl::print_float_vector(const std::vector<float>& vec,
 
 // Dechirp helper function: Apply conjugated nominal chirp, perform FFT, find peak
 std::pair<float, int>
-css_frame_sync_impl::dechirp(const gr_complex *input_buffer, int64_t buffer_offset_in_buffer, bool is_up)
+dechirp(const gr_complex *input_buffer, int64_t buffer_offset_in_buffer, bool is_up, int sample_num, 
+    std::shared_ptr<gr::fft::fft_complex_fwd> fft, int fft_len, int bin_num,
+    std::vector<std::complex<float>>& upchirp, std::vector<std::complex<float>>& downchirp)
 {
-    // Need d_sample_num samples from the input buffer starting at buffer_offset_in_buffer
+    // Need sample_num samples from the input buffer starting at buffer_offset_in_buffer
     // for the dechirping step.
-    // The result is then zero-padded to d_fft_len for the FFT.
+    // The result is then zero-padded to fft_len for the FFT.
 
     // Check if the buffer offset and required samples are valid within the input buffer
-    // This check relies on the caller (work) ensuring that buffer_offset_in_buffer + d_sample_num
+    // This check relies on the caller (work) ensuring that buffer_offset_in_buffer + sample_num
     // does not exceed the bounds of the provided input_buffer segment.
     // In work, the input_buffer can be the start of the current input chunk (`in`)
-    // or the start of the history buffer (`in - this->history() + d_sample_num`).
+    // or the start of the history buffer (`in - this->history() + sample_num`).
     // The offset is calculated relative to whichever pointer is passed.
     // Assuming the caller ensures enough data is available from the given input_buffer start.
 
-    std::vector<gr_complex> dechirped_symbol(d_sample_num, 0);
+    std::vector<gr_complex> dechirped_symbol(sample_num, 0);
 
     memcpy(dechirped_symbol.data(), 
            input_buffer + buffer_offset_in_buffer, 
-           d_sample_num * sizeof(gr_complex));
-    if (d_debug) {
-        std::cout << "===== DEBUG: Input Data Copy =====" << std::endl;
-        std::cout << "Copied " << d_sample_num << " samples from offset " 
-                  << buffer_offset_in_buffer << std::endl;
-        std::cout << "First sample: " << dechirped_symbol[0].real() << " + " 
-                  << dechirped_symbol[0].imag() << "j" << std::endl;
-        std::cout << "Last sample: " << dechirped_symbol.back().real() << " + " 
-                  << dechirped_symbol.back().imag() << "j" << std::endl;
-        std::cout << "================================" << std::endl;
-    }
+           sample_num * sizeof(gr_complex));
     
     // Use a vector for FFT input which will be zero-padded
-    std::vector<gr_complex> fft_input(d_fft_len, 0); // Automatically initialized to zeros
+    std::vector<gr_complex> fft_input(fft_len, 0); // Automatically initialized to zeros
 
-    const std::vector<gr_complex>& chirp_to_use = is_up ? d_upchirp : d_downchirp;
+    const std::vector<gr_complex>& chirp_to_use = is_up ? upchirp : downchirp;
 
     // Apply dechirping (complex multiplication with conjugate chirp)
     // Use VOLK for optimized multiplication if available
     volk_32fc_x2_multiply_conjugate_32fc(dechirped_symbol.data(), 
                                         dechirped_symbol.data(), 
                                         chirp_to_use.data(), 
-                                        d_sample_num);
+                                        sample_num);
 
-    // Copy dechirped signal into FFT input buffer (first d_sample_num points)
-    // The remaining points in fft_input (from d_sample_num to d_fft_len-1) remain zero (zero-padding)
+    // Copy dechirped signal into FFT input buffer (first sample_num points)
+    // The remaining points in fft_input (from sample_num to fft_len-1) remain zero (zero-padding)
     std::copy(dechirped_symbol.begin(), dechirped_symbol.end(), fft_input.begin());
 
-    // print_complex_vector(fft_input, "FFT input (after zero-padding)", d_sample_num);
+    // print_complex_vector(fft_input, "FFT input (after zero-padding)", sample_num);
 
     // Execute FFT
     // 1. Copy input data to FFT's input buffer
-    gr_complex* fft_in = d_fft->get_inbuf();
-    memcpy(fft_in, fft_input.data(), d_fft_len * sizeof(gr_complex));
+    gr_complex* fft_in = fft->get_inbuf();
+    memcpy(fft_in, fft_input.data(), fft_len * sizeof(gr_complex));
     // 2. Execute FFT
-    d_fft->execute();
+    fft->execute();
     // 3. Get result from FFT's output buffer
     // Note: Direct access to outbuf is common, but copying to a vector is also fine
-    // std::vector<gr_complex> fft_output(d_fft_len);
-    // memcpy(fft_output.data(), d_fft->get_outbuf(), d_fft_len * sizeof(gr_complex));
-    const gr_complex* fft_output = d_fft->get_outbuf(); // Access output directly
+    // std::vector<gr_complex> fft_output(fft_len);
+    // memcpy(fft_output.data(), fft->get_outbuf(), fft_len * sizeof(gr_complex));
+    const gr_complex* fft_output = fft->get_outbuf(); // Access output directly
 
     // Calculate combined magnitude spectrum (corresponding to matlab abs(ft(1:bin_num)) + abs(ft(fft_len-bin_num+1:fft_len)))
     // This combines the positive and negative frequency components for a given bin offset due to cyclic property of chirps.
-    std::vector<float> combined_mag(d_bin_num);
-    for (int i = 0; i < d_bin_num; ++i) {
+    std::vector<float> combined_mag(bin_num);
+    for (int i = 0; i < bin_num; ++i) {
         // In C++ (0-indexed): fft_output[0...bin_num-1] and fft_output[fft_len-bin_num ... fft_len-1]
         // The corresponding bins are i and fft_len - 1 - i for 0-based indexing.
-        combined_mag[i] = std::abs(fft_output[i]) + std::abs(fft_output[d_fft_len - 1 - i]);
+        combined_mag[i] = std::abs(fft_output[i]) + std::abs(fft_output[fft_len - 1 - i]);
     }
-    // print_float_vector(combined_mag, "Combine Mag", d_bin_num);
+    // print_float_vector(combined_mag, "Combine Mag", bin_num);
 
     // Find the peak in the combined magnitude spectrum
     auto max_it = std::max_element(combined_mag.begin(), combined_mag.end());
     float peak_mag = *max_it;
-    int peak_idx_0_based = std::distance(combined_mag.begin(), max_it); // 0-based index in combined_mag [0, d_bin_num-1]
+    int peak_idx_0_based = std::distance(combined_mag.begin(), max_it); // 0-based index in combined_mag [0, bin_num-1]
 
     // Return (magnitude, 0-based index)
     return {peak_mag, peak_idx_0_based};
@@ -319,7 +307,7 @@ int css_frame_sync_impl::work(int noutput_items,
                         break; // Exit while loop, return noutput_items
                     }
 
-                    std::pair<float, int> up_peak = dechirp(in, current_symbol_start_in_buffer, true);
+                    std::pair<float, int> up_peak = dechirp(in, current_symbol_start_in_buffer, true, d_sample_num, d_fft, d_fft_len, d_bin_num, d_upchirp, d_downchirp);
 
                     if (d_debug) {
                         fprintf(stderr, "css_frame_sync_impl::work: State SEARCHING_PREAMBLE. Checking abs_pos %ld (buffer_offset %ld). Up peak: (mag=%.2f, bin=%d).\n",
@@ -416,7 +404,7 @@ int css_frame_sync_impl::work(int noutput_items,
                                 d_current_search_pos = d_current_search_pos + sto_move_delta; // Update based on original position + offset
                                 
                                 current_symbol_start_in_buffer = d_current_search_pos - abs_read_pos; // Offset from 'in'
-                                up_peak = dechirp(in, current_symbol_start_in_buffer, true);
+                                up_peak = dechirp(in, current_symbol_start_in_buffer, true, d_sample_num, d_fft, d_fft_len, d_bin_num, d_upchirp, d_downchirp);
 
                                 if (d_debug) {
                                     fprintf(stderr, "css_frame_sync_impl::work: State REFINING_POSITION. Validate sto. mag %f bin_num %d\n",
@@ -479,8 +467,8 @@ int css_frame_sync_impl::work(int noutput_items,
                     }
 
                     // Perform dechirp on the symbol at d_current_search_pos
-                    std::pair<float, int> up_peak = dechirp(in, current_symbol_start_in_buffer, true);
-                    std::pair<float, int> down_peak = dechirp(in, current_symbol_start_in_buffer, false);
+                    std::pair<float, int> up_peak = dechirp(in, current_symbol_start_in_buffer, true, d_sample_num, d_fft, d_fft_len, d_bin_num, d_upchirp, d_downchirp);
+                    std::pair<float, int> down_peak = dechirp(in, current_symbol_start_in_buffer, false, d_sample_num, d_fft, d_fft_len, d_bin_num, d_upchirp, d_downchirp);
 
                     if (d_debug) {
                         fprintf(stderr, "css_frame_sync_impl::work: State SEARCHING_DOWNCHIRP. Checking abs_pos %ld (buffer_offset %ld). Up peak: (mag=%.2f, bin=%d), Down peak: (mag=%.2f, bin=%d).\n",
@@ -540,7 +528,7 @@ int css_frame_sync_impl::work(int noutput_items,
                     fprintf(stderr, "css_frame_sync_impl::work: State CFO_CALCULATING. Data for preamble symbol at abs_pos %ld available (adjusted buffer offset %ld). Dechirping upchirp...\n",
                             preamble_start_abs, required_start_in_buffer);
                 }
-                std::pair<float, int> pku = dechirp(in, required_start_in_buffer, true);
+                std::pair<float, int> pku = dechirp(in, required_start_in_buffer, true, d_sample_num, d_fft, d_fft_len, d_bin_num, d_upchirp, d_downchirp);
                 d_preamble_bin = pku.second; // 0-based index in [0, d_bin_num-1]
 
                 if (d_debug) {
@@ -591,8 +579,8 @@ int css_frame_sync_impl::work(int noutput_items,
                     fprintf(stderr, "css_frame_sync_impl::work: State PAYLOAD_START_CALCULATING. Data for symbol before sync word at abs_pos %ld available (adjusted buffer offset %ld). Dechirping up/down...\n",
                              symbol_before_sync_start_abs, required_start_in_buffer);
                 }
-                std::pair<float, int> pku = dechirp(in, required_start_in_buffer, true);
-                std::pair<float, int> pkd = dechirp(in, required_start_in_buffer, false);
+                std::pair<float, int> pku = dechirp(in, required_start_in_buffer, true, d_sample_num, d_fft, d_fft_len, d_bin_num, d_upchirp, d_downchirp);
+                std::pair<float, int> pkd = dechirp(in, required_start_in_buffer, false, d_sample_num, d_fft, d_fft_len, d_bin_num, d_upchirp, d_downchirp);
 
                 if (d_debug) {
                     fprintf(stderr, "  Symbol before sync dechirp peaks: Up (mag=%.2f, bin=%d), Down (mag=%.2f, bin=%d)\n",
@@ -667,10 +655,10 @@ int css_frame_sync_impl::work(int noutput_items,
                     // Net id debug
                     int64_t symbol_start_abs = d_current_search_pos - (17 * d_sample_num / 4);
                     required_start_in_buffer = symbol_start_abs - abs_read_pos;
-                    std::pair<float, int> pk_netid_1 = dechirp(in, required_start_in_buffer, true);
+                    std::pair<float, int> pk_netid_1 = dechirp(in, required_start_in_buffer, true, d_sample_num, d_fft, d_fft_len, d_bin_num, d_upchirp, d_downchirp);
                     symbol_start_abs = d_current_search_pos - (13 * d_sample_num / 4);
                     required_start_in_buffer = symbol_start_abs - abs_read_pos;
-                    std::pair<float, int> pk_netid_2 = dechirp(in, required_start_in_buffer, true);
+                    std::pair<float, int> pk_netid_2 = dechirp(in, required_start_in_buffer, true, d_sample_num, d_fft, d_fft_len, d_bin_num, d_upchirp, d_downchirp);
                     // Net id calc
                     int netid_1 = (int(round((pk_netid_1.second + d_bin_num - d_preamble_bin) / (double)d_zero_padding_ratio))) % (1 << d_sf);
                     int netid_2 = (int(round((pk_netid_2.second + d_bin_num - d_preamble_bin) / (double)d_zero_padding_ratio))) % (1 << d_sf);

@@ -19,6 +19,20 @@
 namespace gr {
 namespace cssmods {
 
+// Helper function for dechirping and finding peak
+// Applies conjugated nominal chirp, performs FFT, finds peak in combined magnitude spectrum.
+// input_buffer: Pointer to the start of the complex input buffer.
+// buffer_offset_in_buffer: The 0-based index within input_buffer where the symbol starts.
+// is_up: True for upchirp dechirp, false for downchirp dechirp.
+// Returns {peak_magnitude, peak_bin_index_0_based} in the range [0, d_bin_num - 1].
+std::pair<float, int> dechirp(const gr_complex *input_buffer, int64_t buffer_offset_in_buffer, bool is_up, int sample_num, 
+    std::shared_ptr<gr::fft::fft_complex_fwd> fft, int fft_len, int bin_num,
+    std::vector<std::complex<float>>& upchirp, std::vector<std::complex<float>>& downchirp);
+
+// Debug helper
+void print_complex_vector(const std::vector<gr_complex>& vec, const std::string& name, size_t max_print);
+void print_float_vector(const std::vector<float>& vec, const std::string& name, size_t max_print = 10);
+
 // State machine for synchronization process
 enum sync_state_t {
     STATE_IDLE,                      // Initial state, searching hasn't started effectively
@@ -51,18 +65,6 @@ private:
     int d_preamble_bin;           // Peak bin index of the last preamble upchirp (used for CFO calc)
     double d_cfo;                 // Calculated Carrier Frequency Offset (Hz)
     int d_preamble_counter;
-
-    // Helper function for dechirping and finding peak
-    // Applies conjugated nominal chirp, performs FFT, finds peak in combined magnitude spectrum.
-    // input_buffer: Pointer to the start of the complex input buffer.
-    // buffer_offset_in_buffer: The 0-based index within input_buffer where the symbol starts.
-    // is_up: True for upchirp dechirp, false for downchirp dechirp.
-    // Returns {peak_magnitude, peak_bin_index_0_based} in the range [0, d_bin_num - 1].
-    std::pair<float, int> dechirp(const gr_complex *input_buffer, int64_t buffer_offset_in_buffer, bool is_up);
-
-    // Debug helper
-    void print_complex_vector(const std::vector<gr_complex>& vec, const std::string& name, size_t max_print);
-    void print_float_vector(const std::vector<float>& vec, const std::string& name, size_t max_print = 10);
 
 public:
     css_frame_sync_impl(int sf, double bw, int zero_padding_ratio);
