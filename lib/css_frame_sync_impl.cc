@@ -292,9 +292,6 @@ int css_frame_sync_impl::work(int noutput_items,
     // for the current state's *minimum* operation.
     // The data availability checks within each state handle needing more than the minimum.
     while (d_state != STATE_SYNC_COMPLETE) {
-
-        int64_t current_abs_pos = d_current_search_pos; // Position state is focused on
-
         // Calculate the start index within the *current* input buffer for the required data.
         // This is relative to the start of the buffer `in` (abs_read_pos).
         // If required_start_abs < abs_read_pos, the data is in history.
@@ -311,7 +308,6 @@ int css_frame_sync_impl::work(int noutput_items,
             case STATE_SEARCHING_PREAMBLE: {
                 while (d_current_search_pos + d_sample_num <= abs_end_pos) {
                     int64_t current_symbol_start_in_buffer = d_current_search_pos - abs_read_pos;
-                    std::pair<float, int> up_peak = dechirp(in, current_symbol_start_in_buffer, true);
 
                     // Re-check if enough data from the new start pos
                     if (d_current_search_pos + d_sample_num > abs_end_pos) {
@@ -322,6 +318,8 @@ int css_frame_sync_impl::work(int noutput_items,
                         }
                         break; // Exit while loop, return noutput_items
                     }
+
+                    std::pair<float, int> up_peak = dechirp(in, current_symbol_start_in_buffer, true);
 
                     if (d_debug) {
                         fprintf(stderr, "css_frame_sync_impl::work: State SEARCHING_PREAMBLE. Checking abs_pos %ld (buffer_offset %ld). Up peak: (mag=%.2f, bin=%d).\n",
@@ -389,6 +387,42 @@ int css_frame_sync_impl::work(int noutput_items,
                                 // Restore to default value
                                 d_preamble_counter = 0;
                                 d_preamble_bin = -1;
+                                
+                                float to; // Offset in samples
+                                if (up_peak.second >= d_bin_num / 4) { // Note: matlab used >, C++ uses >= for 0-based comparison
+                                    if (d_debug) {
+                                        fprintf(stderr, "css_frame_sync_impl::work: State REFINING_POSITION. PKD.second larger than d_bin_num / 4: %d > %d \n",
+                                                up_peak.second, d_bin_num / 4);
+                                    }
+                                    // Peak in upper half corresponds to negative time offset
+                                    to = float(d_bin_num - up_peak.second) / d_zero_padding_ratio; // Convert bin index to sample offset
+                                } else {
+                                    if (d_debug) {
+                                        fprintf(stderr, "css_frame_sync_impl::work: State REFINING_POSITION. PKD.second smaller than d_bin_num / 4: %d <= %d \n",
+                                                up_peak.second, d_bin_num / 4);
+                                    }
+                                    // Peak in lower half corresponds to positive time offset
+                                    to = float(up_peak.second) / d_zero_padding_ratio; // Convert bin index to sample offset
+                                }
+                                // Round the sample offset for integer sample positioning
+                                int sto_move_delta = round(to * 2); 
+
+                                if (d_debug) {
+                                    fprintf(stderr, "css_frame_sync_impl::work: State REFINING_POSITION. Move current search position with %d sample\n",
+                                            sto_move_delta);
+                                }
+
+                                // Apply the calculated sample offset to the current search position
+                                d_current_search_pos = d_current_search_pos + sto_move_delta; // Update based on original position + offset
+                                
+                                current_symbol_start_in_buffer = d_current_search_pos - abs_read_pos; // Offset from 'in'
+                                up_peak = dechirp(in, current_symbol_start_in_buffer, true);
+
+                                if (d_debug) {
+                                    fprintf(stderr, "css_frame_sync_impl::work: State REFINING_POSITION. Validate sto. mag %f bin_num %d\n",
+                                            up_peak.first, up_peak.second);
+                                }    
+
                                 goto end_search_preamble;
                             }
                         }
@@ -480,55 +514,6 @@ int css_frame_sync_impl::work(int noutput_items,
 
 
             case STATE_REFINING_POSITION: {
-                // Needs d_sample_num samples starting at d_current_search_pos (the potential downchirp start)
-                int64_t symbol_start_abs = d_current_search_pos;
-                int required_samples = d_sample_num;
-                int64_t required_start_in_buffer = symbol_start_abs - abs_read_pos; // Offset from 'in'
-
-                if (d_debug) {
-                    fprintf(stderr, "css_frame_sync_impl::work: State REFINING_POSITION. Data for symbol at abs_pos %ld fully in buffer. Dechirping...\n", symbol_start_abs);
-                }
-                std::pair<float, int> pkd = dechirp(in, required_start_in_buffer, false);
-                if (d_debug) {
-                        fprintf(stderr, "  Refinement dechirp peak: (mag=%.2f, bin=%d)\n", pkd.first, pkd.second);
-                }
-
-                // Calculate fine timing offset 'to' (matlab: pkd(2) is 1-based index)
-                // C++ pkd.second is 0-based index [0, d_bin_num-1]
-                // The peak bin represents a fractional symbol offset.
-                // The mapping from bin index to time offset is approximately bin * (symbol_duration / fft_len)
-                // which simplifies to bin / (BW * zero_padding_ratio).
-                // Relative to d_sample_num samples, the offset in samples is bin * (d_sample_num / fft_len)
-                // = bin / zero_padding_ratio.
-                // The peak can appear in bin [0, d_bin_num-1]. Bin d_bin_num/2 corresponds to 0 offset.
-                // Bins > d_bin_num/2 wrap around to negative offsets.
-                float to; // Offset in samples
-                if (pkd.second >= d_bin_num / 2) { // Note: matlab used >, C++ uses >= for 0-based comparison
-                    if (d_debug) {
-                        fprintf(stderr, "css_frame_sync_impl::work: State REFINING_POSITION. PKD.second larger than d_bin_num / 2: %d > %d \n",
-                                pkd.second, d_bin_num / 2);
-                    }
-                    // Peak in upper half corresponds to negative time offset
-                    to = float(pkd.second - d_bin_num) / d_zero_padding_ratio; // Convert bin index to sample offset
-                } else {
-                    if (d_debug) {
-                        fprintf(stderr, "css_frame_sync_impl::work: State REFINING_POSITION. PKD.second smaller than d_bin_num / 2: %d <= %d \n",
-                                pkd.second, d_bin_num / 2);
-                    }
-                    // Peak in lower half corresponds to positive time offset
-                    to = float(pkd.second) / d_zero_padding_ratio; // Convert bin index to sample offset
-                }
-                // Round the sample offset for integer sample positioning
-                int sto_move_delta = round(to); 
-
-                // Apply the calculated sample offset to the current search position
-                d_current_search_pos = symbol_start_abs + sto_move_delta; // Update based on original position + offset
-
-                if (d_debug) {
-                    fprintf(stderr, "css_frame_sync_impl::work: State REFINING_POSITION. Calculated fine timing offset: %d samples. Refined sync symbol start absolute position: %ld. Transitioning to CFO_CALCULATING.\n",
-                            sto_move_delta, d_current_search_pos);
-                }
-
                 d_state = STATE_CFO_CALCULATING;
                 // Continue to next state's processing within this work call if possible
             } break; // End of STATE_REFINING_POSITION case
