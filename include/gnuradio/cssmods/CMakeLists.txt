@@ -13,5 +13,6 @@ install(FILES
     api.h
     css_modulate.h
     css_symbols.h
-    css_frame_sync.h DESTINATION include/gnuradio/cssmods
+    css_frame_sync.h
+    css_decode_symbols.h DESTINATION include/gnuradio/cssmods
 )

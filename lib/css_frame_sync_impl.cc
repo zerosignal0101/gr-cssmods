@@ -45,7 +45,7 @@ css_frame_sync_impl::css_frame_sync_impl(int sf, double bw, int zero_padding_rat
         d_bin_num((1 << sf) * zero_padding_ratio), // Number of relevant bins after zero-padding
         d_fft_len(d_sample_num * zero_padding_ratio), // FFT length including zero-padding
         d_preamble_len(8),
-        d_debug(true), // *** Initialize debug flag to true ***
+        d_debug(false), // *** Initialize debug flag to true ***
         d_state(STATE_IDLE),
         d_current_search_pos(0), // Absolute stream index
         d_preamble_bin(-1),
@@ -634,10 +634,16 @@ int css_frame_sync_impl::work(int noutput_items,
 
                 // Add tag at the calculated payload start position (absolute stream index)
                 // Tagging with absolute position is generally more robust in GNU Radio.
+                pmt::pmt_t payload_dict = pmt::make_dict();
+                pmt::dict_add(payload_dict, pmt::string_to_symbol("preamble_bin"), pmt::from_long(d_preamble_bin)); // d_preamble_bin is 0-based
+                pmt::dict_add(payload_dict, pmt::string_to_symbol("cfo"), pmt::from_double(d_cfo));
+                pmt::dict_add(payload_dict, pmt::string_to_symbol("sf"), pmt::from_long(d_sf));
+                pmt::dict_add(payload_dict, pmt::string_to_symbol("bw"), pmt::from_double(d_bw));
+
                 this->add_item_tag(0, // Port 0
-                                   x_sync, // Absolute offset in *output* stream
-                                   pmt::string_to_symbol("payload_start"), // Tag key
-                                   pmt::make_dict()); // Tag value (can add CFO, SF, BW etc. here)
+                                x_sync, // Absolute offset in *output* stream
+                                pmt::string_to_symbol("payload_start"), // Tag key
+                                payload_dict); // Tag value
 
                 if (d_debug) {
                      fprintf(stderr, "css_frame_sync_impl::work: !!!!! LoRa Frame Sync Found! Tag added at absolute position %ld. Calculated CFO: %f Hz. !!!!!\n", x_sync, d_cfo);
