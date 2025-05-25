@@ -36,6 +36,8 @@ css_decode_symbols_impl::css_decode_symbols_impl(int sf,
       d_decoding_active(false),
       d_current_search_pos(0), // Absolute stream index
       d_preamble_bin(-1),
+      d_temp_data(d_sample_num, 0),
+      d_temp_pos(0),
       d_debug(true) // Set to true for debug output, or make it a parameter
 {
     if (d_debug) {
@@ -57,7 +59,7 @@ css_decode_symbols_impl::css_decode_symbols_impl(int sf,
         print_complex_vector(d_upchirp, "Decoder d_upchirp", 16);
     }
 
-    set_history(4 * d_sample_num);
+    set_history(1 * d_sample_num);
     if (d_debug) {
         fprintf(stderr, "css_decode_symbols_impl: History set to %zu samples.\n", this->history());
     }
@@ -95,7 +97,8 @@ int css_decode_symbols_impl::general_work(int noutput_items,
 
     std::vector<tag_t> tags;
     if (d_debug) {
-        fprintf(stderr, "css_decode_symbols_impl: Search tags from %lu (input idx %d).\n", abs_read_pos, current_buffer_length);
+        fprintf(stderr, "css_decode_symbols_impl: Search tags from %lu (input idx %d).\n", 
+            abs_read_pos, current_buffer_length);
     }
     get_tags_in_window(tags, 0, 0, current_buffer_length);
     for (const auto &tag : tags) {
@@ -130,6 +133,26 @@ int css_decode_symbols_impl::general_work(int noutput_items,
             }
 
             d_current_search_pos = tag.offset;
+
+            if (d_debug) {
+                // // Data copy
+                // int64_t required_start_in_buffer = d_current_search_pos - d_sample_num - abs_read_pos; // Offset from 'in'
+                // std::vector<gr_complex> dechirped_symbol(d_sample_num * 4, 0);
+                // memcpy(dechirped_symbol.data(), 
+                //     in_ptr + required_start_in_buffer, 
+                //     d_sample_num * 4 * sizeof(gr_complex));
+                // print_complex_vector(dechirped_symbol, "Dechirped symbol around d_current_search_pos +-d_sample_num (ori)", 1024);
+
+                // // 测试 d_current_search_pos 附近的偏移
+                // fprintf(stderr, "\nTesting around d_current_search_pos (%ld):\n", d_current_search_pos);
+                // for (int offset = -d_sample_num; offset <= d_sample_num; offset += 8) {
+                //     int64_t current_symbol_start_in_buffer = d_current_search_pos + offset - abs_read_pos;
+                //     std::pair<float, int> up_peak = dechirp(in_ptr, current_symbol_start_in_buffer, true, d_sample_num, d_fft, d_fft_len, 
+                //                     d_bin_num, d_upchirp, d_downchirp);
+                //     fprintf(stderr, "Offset %+4d: pos %6ld, mag %8.2f, bin %2d\n", 
+                //             offset, current_symbol_start_in_buffer, up_peak.first, up_peak.second);
+                // }
+            }
 
             if (pmt::is_dict(tag.value)) {
                 d_preamble_bin = pmt::to_long(pmt::dict_ref(tag.value, pmt::string_to_symbol("preamble_bin"), pmt::from_long(-1)));
@@ -198,7 +221,7 @@ int css_decode_symbols_impl::general_work(int noutput_items,
                 current_buffer_length, current_buffer_length, produced_count, noutput_items, d_decoding_active ? "Yes" : "No");
     }
     // This consumes the samples that were successfully processed within the loop (up to consumed_count).
-    consume(0, current_buffer_length);
+    consume_each(current_buffer_length);
     // Return the number of output items produced in this call.
     return produced_count;
 }

@@ -42,6 +42,8 @@ private:
     int64_t d_current_search_pos; // Absolute index in the stream where the current state's operation is centered or searching from
     int d_preamble_bin;           // Peak bin index of the last preamble upchirp (used for CFO calc)
     double d_cfo;                 // Calculated Carrier Frequency Offset (Hz)
+    std::vector<std::complex<float>> d_temp_data;
+    int d_temp_pos;
 
     bool d_debug; // For debug prints
 

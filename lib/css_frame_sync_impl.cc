@@ -692,15 +692,15 @@ int css_frame_sync_impl::work(int noutput_items,
                     int netid_1 = (int(round((pk_netid_1.second + d_bin_num - d_preamble_bin) / (double)d_zero_padding_ratio))) % (1 << d_sf);
                     int netid_2 = (int(round((pk_netid_2.second + d_bin_num - d_preamble_bin) / (double)d_zero_padding_ratio))) % (1 << d_sf);
                     fprintf(stderr, "css_frame_sync_impl::work: Net id calculated:  %d, %d. !!!!!\n", netid_1, netid_2);
-                    // symbol_start_abs = d_current_search_pos + d_sample_num;
-                    // required_start_in_buffer = symbol_start_abs - abs_read_pos;
-                    // std::pair<float, int> pk_payload_1 = dechirp(in, required_start_in_buffer, true, d_sample_num, d_fft, d_fft_len, d_bin_num, d_upchirp, d_downchirp);
-                    // int payload_symbol_1 = (int(round((pk_payload_1.second + d_bin_num - d_preamble_bin) / (double)d_zero_padding_ratio))) % (1 << d_sf);
-                    // fprintf(stderr, "css_frame_sync_impl::work: Payload symbol 2 calculated:  %d (from abs pos %ld, %ld). !!!!!\n", payload_symbol_1, symbol_start_abs, symbol_start_abs + d_sample_num);
-                    // std::vector<gr_complex> dechirped_symbol(d_sample_num, 0);
-                    // memcpy(dechirped_symbol.data(), 
-                    //     in + required_start_in_buffer, 
-                    //     d_sample_num * sizeof(gr_complex));
+                    symbol_start_abs = d_current_search_pos + d_sample_num;
+                    required_start_in_buffer = symbol_start_abs - abs_read_pos;
+                    std::pair<float, int> pk_payload_1 = dechirp(in, required_start_in_buffer, true, d_sample_num, d_fft, d_fft_len, d_bin_num, d_upchirp, d_downchirp);
+                    int payload_symbol_1 = (int(round((pk_payload_1.second + d_bin_num - d_preamble_bin) / (double)d_zero_padding_ratio))) % (1 << d_sf);
+                    fprintf(stderr, "css_frame_sync_impl::work: Payload symbol 2 calculated:  %d (from abs pos %ld, %ld). !!!!!\n", payload_symbol_1, symbol_start_abs, symbol_start_abs + d_sample_num);
+                    std::vector<gr_complex> dechirped_symbol(d_sample_num, 0);
+                    memcpy(dechirped_symbol.data(), 
+                        in + required_start_in_buffer, 
+                        d_sample_num * sizeof(gr_complex));
                     // print_complex_vector(dechirped_symbol, "Dechirped symbol (ori) Frame Sync payload 2", 256);
                 }
             } break; // End of STATE_PAYLOAD_START_CALCULATING case
