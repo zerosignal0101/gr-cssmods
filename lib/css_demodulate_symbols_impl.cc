@@ -274,7 +274,7 @@ int css_demodulate_symbols_impl::general_work(int noutput_items,
     // Stay in the loop as long as we are actively syncing AND have enough data
     // for the current state's *minimum* operation.
     // The data availability checks within each state handle needing more than the minimum.
-    while (d_state != STATE_SYNC_COMPLETE) {
+    while (d_state != STATE_PDU_OUTPUT) {
         // Calculate the start index within the *current* input buffer for the required data.
         // This is relative to the start of the buffer `in` (abs_read_pos).
         // If required_start_abs < abs_read_pos, the data is in history.
@@ -667,20 +667,13 @@ int css_demodulate_symbols_impl::general_work(int noutput_items,
                     int netid_1 = (int(round((pk_netid_1.second + d_bin_num - d_preamble_bin) / (double)d_zero_padding_ratio))) % (1 << d_sf);
                     int netid_2 = (int(round((pk_netid_2.second + d_bin_num - d_preamble_bin) / (double)d_zero_padding_ratio))) % (1 << d_sf);
                     fprintf(stderr, "css_frame_sync_impl::work: Net id calculated:  %d, %d. !!!!!\n", netid_1, netid_2);
-                    symbol_start_abs = d_current_search_pos + d_sample_num;
-                    required_start_in_buffer = symbol_start_abs - abs_read_pos;
-                    std::pair<float, int> pk_payload_1 = dechirp(in, required_start_in_buffer, true, d_sample_num, d_fft, d_fft_len, d_bin_num, d_upchirp, d_downchirp);
-                    int payload_symbol_1 = (int(round((pk_payload_1.second + d_bin_num - d_preamble_bin) / (double)d_zero_padding_ratio))) % (1 << d_sf);
-                    fprintf(stderr, "css_frame_sync_impl::work: Payload symbol 2 calculated:  %d (from abs pos %ld, %ld). !!!!!\n", payload_symbol_1, symbol_start_abs, symbol_start_abs + d_sample_num);
-                    std::vector<gr_complex> dechirped_symbol(d_sample_num, 0);
-                    memcpy(dechirped_symbol.data(), 
-                        in + required_start_in_buffer, 
-                        d_sample_num * sizeof(gr_complex));
-                    // print_complex_vector(dechirped_symbol, "Dechirped symbol (ori) Frame Sync payload 2", 256);
                 }
-            } break; // End of STATE_PAYLOAD_START_CALCULATING case
+            } // End of STATE_PAYLOAD_START_CALCULATING case
 
             case STATE_SYNC_COMPLETE:
+                if (d_debug) {
+                    fprintf(stderr, "css_frame_sync_impl::work: State STATE_SYNC_COMPLETE started. \n");
+                }
                 while (d_current_search_pos + d_sample_num <= abs_end_pos) {
                     // We have enough data *from the current search position* within the current buffer.
                     int64_t current_symbol_start_in_buffer = d_current_search_pos - abs_read_pos;
@@ -689,7 +682,7 @@ int css_demodulate_symbols_impl::general_work(int noutput_items,
                     if (d_current_search_pos + d_sample_num > abs_end_pos) {
                         // Not enough data even from the buffer start, break search loop
                         if (d_debug) {
-                        fprintf(stderr, "css_frame_sync_impl::work: State SEARCHING_DOWNCHIRP. Not enough data (%ld < %d) even from buffer start %ld. Waiting for more data.\n",
+                        fprintf(stderr, "css_frame_sync_impl::work: State STATE_SYNC_COMPLETE. Not enough data (%ld < %d) even from buffer start %ld. Waiting for more data.\n",
                                 abs_end_pos - d_current_search_pos, d_sample_num, d_current_search_pos);
                         }
                         break; // Exit while loop, return noutput_items
@@ -711,10 +704,18 @@ int css_demodulate_symbols_impl::general_work(int noutput_items,
                     // Check for upchirp detection (simple magnitude comparison)
                     if (std::abs(up_peak.first) >= 100.0) {
                         symbol_value = (int(round((up_peak.second + d_bin_num - d_preamble_bin) / (double)d_zero_padding_ratio))) % (1 << d_sf);
+                        if (d_debug) {
+                            fprintf(stderr, "css_frame_sync_impl::work: State STATE_SYNC_COMPLETE. Get symbol: %d\n",
+                                    symbol_value);
+                        }
                         d_final_symbols.push_back(symbol_value);
                     }
                     else {
                         d_state = STATE_PDU_OUTPUT;
+                        if (d_debug) {
+                            fprintf(stderr, "css_frame_sync_impl::work: State STATE_SYNC_COMPLETE. Symbols ended. The up peak is low: %f\n",
+                                    up_peak.first);
+                        }
                         goto finish_symbol_processing;
                     }
                 }
@@ -723,19 +724,21 @@ int css_demodulate_symbols_impl::general_work(int noutput_items,
                 // in the current buffer chunk. d_current_search_pos is already updated
                 // to the start of the next symbol to check in the *next* work call.
                 if (d_debug) {
-                     fprintf(stderr, "css_frame_sync_impl::work: State STATE_SYNC_COMPLETE. Ran out of data in buffer [%ld, %ld) before finding downchirp. Next search starts at %ld. Waiting for more data.\n",
-                             abs_read_pos, abs_end_pos, d_current_search_pos);
+                    fprintf(stderr, "css_frame_sync_impl::work: State STATE_SYNC_COMPLETE. Ran out of data in buffer [%ld, %ld) before finding downchirp. Next search starts at %ld. Waiting for more data.\n",
+                            abs_read_pos, abs_end_pos, d_current_search_pos);
                 }
                 consume_each(ninput_items[0]);
                 return noutput_items; // Consume all input, state and search pos are saved
             finish_symbol_processing:;
-            break; // Exit switch, loop condition will be checked
 
             case STATE_PDU_OUTPUT:
                 pmt::pmt_t value = pmt::init_u32vector(d_final_symbols.size(), d_final_symbols.data());
                 pmt::pmt_t output_msg = pmt::cons(pmt::make_dict(), value);
                 // 发布消息
                 message_port_pub(pmt::mp("out"), output_msg);
+                if (d_debug) {
+                    fprintf(stderr, "css_frame_sync_impl::work: State STATE_PDU_OUTPUT. Output a PDU consists of symbols.\n");
+                }
                 d_state = STATE_SEARCHING_PREAMBLE;
             break;
         }
