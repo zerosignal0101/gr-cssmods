@@ -1,0 +1,51 @@
+id: cssmods_css_demodulate_symbols
+label: css_demodulate_symbols
+category: '[cssmods]'
+
+templates:
+  imports: from gnuradio import cssmods
+  make: cssmods.css_demodulate_symbols(${sf}, ${bw}, ${zero_padding_ratio})
+
+parameters:
+- id: sf
+  label: Spreading Factor
+  dtype: int
+  default: 7
+  options: [7, 8, 9, 10, 11, 12]
+  option_labels: ['7', '8', '9', '10', '11', '12']
+  
+- id: bw
+  label: Bandwidth (Hz)
+  dtype: float
+  default: 125000
+  options: [125000, 250000, 500000]
+  option_labels: ['125 kHz', '250 kHz', '500 kHz']
+  
+- id: zero_padding_ratio
+  label: Zero Padding Ratio
+  dtype: int
+  default: 10
+inputs:
+- label: in
+  domain: stream
+  dtype: complex
+outputs:
+- domain: message
+  id: out
+  label: out
+  optional: true
+
+file_format: 1
+documentation: |
+  # CSS Frame Synchronization Block
+  
+  This block implements CSS (Chirp Spread Spectrum) frame synchronization:
+  
+  - **Spreading Factor (sf)**: Must match the transmitted signal (7-12)
+  - **Bandwidth (bw)**: Must match the transmitted signal (125 kHz, 250 kHz, or 500 kHz)
+  - **Zero Padding Ratio**: FFT padding ratio (1x or 2x)
+  
+  Detects the LoRa preamble and sync word to find frame start. And extract symbols from the stream.
+  
+  Input: Complex baseband CSS signal
+  Output: Extracted symbols in PDU
