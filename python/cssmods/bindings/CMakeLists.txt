@@ -27,12 +27,10 @@ include(GrPybind)
 ########################################################################
 # Python Bindings
 ########################################################################
-
 list(APPEND cssmods_python_files
     css_modulate_python.cc
     css_symbols_python.cc
-    css_frame_sync_python.cc
-    css_decode_symbols_python.cc python_bindings.cc)
+    python_bindings.cc)
 
 GR_PYBIND_MAKE_OOT(cssmods
    ../../..

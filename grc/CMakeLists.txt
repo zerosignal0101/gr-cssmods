@@ -5,10 +5,8 @@
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-
 install(FILES
     cssmods_css_modulate.block.yml
     cssmods_css_symbols.block.yml
-    cssmods_css_frame_sync.block.yml
-    cssmods_css_decode_symbols.block.yml DESTINATION share/gnuradio/grc/blocks
+    DESTINATION share/gnuradio/grc/blocks
 )
