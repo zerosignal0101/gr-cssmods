@@ -240,7 +240,7 @@ dechirp(const gr_complex *input_buffer, int64_t buffer_offset_in_buffer, bool is
     for (int i = 0; i < bin_num; ++i) {
         // In C++ (0-indexed): fft_output[0...bin_num-1] and fft_output[fft_len-bin_num ... fft_len-1]
         // The corresponding bins are i and fft_len - 1 - i for 0-based indexing.
-        combined_mag[i] = std::abs(fft_output[i]) + std::abs(fft_output[fft_len - 1 - i]);
+        combined_mag[i] = std::abs(fft_output[i]) + std::abs(fft_output[bin_num + i]);
     }
     // print_float_vector(combined_mag, "Combine Mag", bin_num);
 
@@ -377,27 +377,34 @@ int css_frame_sync_impl::work(int noutput_items,
                                 d_preamble_bin = -1;
                                 
                                 float to; // Offset in samples
-                                if (up_peak.second >= d_bin_num / 4) { // Note: matlab used >, C++ uses >= for 0-based comparison
-                                    if (d_debug) {
-                                        fprintf(stderr, "css_frame_sync_impl::work: State REFINING_POSITION. PKD.second larger than d_bin_num / 4: %d > %d \n",
-                                                up_peak.second, d_bin_num / 4);
-                                    }
-                                    // Peak in upper half corresponds to negative time offset
-                                    to = float(d_bin_num - up_peak.second) / d_zero_padding_ratio; // Convert bin index to sample offset
-                                } else {
-                                    if (d_debug) {
-                                        fprintf(stderr, "css_frame_sync_impl::work: State REFINING_POSITION. PKD.second smaller than d_bin_num / 4: %d <= %d \n",
-                                                up_peak.second, d_bin_num / 4);
-                                    }
-                                    // Peak in lower half corresponds to positive time offset
-                                    to = float(up_peak.second) / d_zero_padding_ratio; // Convert bin index to sample offset
+                                if (d_debug) {
+                                    fprintf(stderr, "css_frame_sync_impl::work: State REFINING_POSITION. Calc sto with d_bin_num: %d, up_peak.second: %d\n",
+                                            d_bin_num, up_peak.second);
                                 }
+                                to = float(d_bin_num - up_peak.second) / d_zero_padding_ratio;
                                 // Round the sample offset for integer sample positioning
                                 int sto_move_delta = round(to * 2); 
 
                                 if (d_debug) {
-                                    fprintf(stderr, "css_frame_sync_impl::work: State REFINING_POSITION. Move current search position with %d sample\n",
-                                            sto_move_delta);
+                                    fprintf(stderr, "css_frame_sync_impl::work: State REFINING_POSITION. Move current search position with %d sample from %ld to %ld\n",
+                                            sto_move_delta, d_current_search_pos, d_current_search_pos + sto_move_delta);
+                                    // // Data copy
+                                    // int64_t required_start_in_buffer = d_current_search_pos - d_sample_num - abs_read_pos; // Offset from 'in'
+                                    // std::vector<gr_complex> dechirped_symbol(d_sample_num * 2, 0);
+                                    // memcpy(dechirped_symbol.data(), 
+                                    //     in + required_start_in_buffer, 
+                                    //     d_sample_num * 2 * sizeof(gr_complex));
+                                    // print_complex_vector(dechirped_symbol, "Dechirped symbol around d_current_search_pos +-d_sample_num (ori)", 512);
+
+                                    // // 测试 d_current_search_pos 附近的偏移
+                                    // fprintf(stderr, "\nTesting around d_current_search_pos (%ld) (before move):\n", d_current_search_pos);
+                                    // for (int offset = -d_sample_num; offset <= d_sample_num; offset += 16) {
+                                    //     current_symbol_start_in_buffer = d_current_search_pos + offset - abs_read_pos;
+                                    //     up_peak = dechirp(in, current_symbol_start_in_buffer, true, d_sample_num, d_fft, d_fft_len, 
+                                    //                     d_bin_num, d_upchirp, d_downchirp);
+                                    //     fprintf(stderr, "Offset %+4d: pos %6ld, mag %8.2f, bin %2d\n", 
+                                    //             offset, current_symbol_start_in_buffer, up_peak.first, up_peak.second);
+                                    // }
                                 }
 
                                 // Apply the calculated sample offset to the current search position
@@ -407,9 +414,16 @@ int css_frame_sync_impl::work(int noutput_items,
                                 up_peak = dechirp(in, current_symbol_start_in_buffer, true, d_sample_num, d_fft, d_fft_len, d_bin_num, d_upchirp, d_downchirp);
 
                                 if (d_debug) {
-                                    fprintf(stderr, "css_frame_sync_impl::work: State REFINING_POSITION. Validate sto. mag %f bin_num %d\n",
-                                            up_peak.first, up_peak.second);
-                                }    
+                                    // 测试 d_current_search_pos 附近的偏移
+                                    fprintf(stderr, "\nTesting around d_current_search_pos (%ld):\n", d_current_search_pos);
+                                    for (int offset = -d_sample_num; offset <= d_sample_num; offset += 8) {
+                                        current_symbol_start_in_buffer = d_current_search_pos + offset - abs_read_pos;
+                                        up_peak = dechirp(in, current_symbol_start_in_buffer, true, d_sample_num, d_fft, d_fft_len, 
+                                                        d_bin_num, d_upchirp, d_downchirp);
+                                        fprintf(stderr, "Offset %+4d: pos %6ld, mag %8.2f, bin %2d\n", 
+                                                offset, current_symbol_start_in_buffer, up_peak.first, up_peak.second);
+                                    }
+                                }
 
                                 goto end_search_preamble;
                             }
@@ -678,11 +692,16 @@ int css_frame_sync_impl::work(int noutput_items,
                     int netid_1 = (int(round((pk_netid_1.second + d_bin_num - d_preamble_bin) / (double)d_zero_padding_ratio))) % (1 << d_sf);
                     int netid_2 = (int(round((pk_netid_2.second + d_bin_num - d_preamble_bin) / (double)d_zero_padding_ratio))) % (1 << d_sf);
                     fprintf(stderr, "css_frame_sync_impl::work: Net id calculated:  %d, %d. !!!!!\n", netid_1, netid_2);
-                    symbol_start_abs = d_current_search_pos;
-                    required_start_in_buffer = symbol_start_abs - abs_read_pos;
-                    std::pair<float, int> pk_payload_1 = dechirp(in, required_start_in_buffer, true, d_sample_num, d_fft, d_fft_len, d_bin_num, d_upchirp, d_downchirp);
-                    int payload_symbol_1 = (int(round((pk_payload_1.second + d_bin_num - d_preamble_bin) / (double)d_zero_padding_ratio))) % (1 << d_sf);
-                    fprintf(stderr, "css_frame_sync_impl::work: Payload symbol 1 calculated:  %d (from abs pos %ld, %ld). !!!!!\n", payload_symbol_1, symbol_start_abs, symbol_start_abs + d_sample_num);
+                    // symbol_start_abs = d_current_search_pos + d_sample_num;
+                    // required_start_in_buffer = symbol_start_abs - abs_read_pos;
+                    // std::pair<float, int> pk_payload_1 = dechirp(in, required_start_in_buffer, true, d_sample_num, d_fft, d_fft_len, d_bin_num, d_upchirp, d_downchirp);
+                    // int payload_symbol_1 = (int(round((pk_payload_1.second + d_bin_num - d_preamble_bin) / (double)d_zero_padding_ratio))) % (1 << d_sf);
+                    // fprintf(stderr, "css_frame_sync_impl::work: Payload symbol 2 calculated:  %d (from abs pos %ld, %ld). !!!!!\n", payload_symbol_1, symbol_start_abs, symbol_start_abs + d_sample_num);
+                    // std::vector<gr_complex> dechirped_symbol(d_sample_num, 0);
+                    // memcpy(dechirped_symbol.data(), 
+                    //     in + required_start_in_buffer, 
+                    //     d_sample_num * sizeof(gr_complex));
+                    // print_complex_vector(dechirped_symbol, "Dechirped symbol (ori) Frame Sync payload 2", 256);
                 }
             } break; // End of STATE_PAYLOAD_START_CALCULATING case
 

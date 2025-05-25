@@ -57,7 +57,7 @@ css_decode_symbols_impl::css_decode_symbols_impl(int sf,
         print_complex_vector(d_upchirp, "Decoder d_upchirp", 16);
     }
 
-    set_history(1 * d_sample_num);
+    set_history(4 * d_sample_num);
     if (d_debug) {
         fprintf(stderr, "css_decode_symbols_impl: History set to %zu samples.\n", this->history());
     }
@@ -159,6 +159,13 @@ int css_decode_symbols_impl::general_work(int noutput_items,
     if (d_decoding_active) {
         while (d_current_search_pos + d_sample_num <= abs_end_pos) {
             int64_t required_start_in_buffer = d_current_search_pos - abs_read_pos; // Offset from 'in'
+
+            // std::vector<gr_complex> dechirped_symbol(d_sample_num, 0);
+            // memcpy(dechirped_symbol.data(), 
+            //     in_ptr + required_start_in_buffer, 
+            //     d_sample_num * sizeof(gr_complex));
+            // print_complex_vector(dechirped_symbol, "Dechirped symbol (ori) Decode payload 1", 256);
+
             // Dechirp the collected symbol (payload symbols are typically upchirps)
             std::pair<float, int> peak_info = dechirp(
                 in_ptr, required_start_in_buffer, true, // Pass true for upchirp dechirp if payload is upchirp based
