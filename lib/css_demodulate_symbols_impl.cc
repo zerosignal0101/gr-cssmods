@@ -702,7 +702,7 @@ int css_demodulate_symbols_impl::general_work(int noutput_items,
 
                     int symbol_value;
                     // Check for upchirp detection (simple magnitude comparison)
-                    if (std::abs(up_peak.first) >= 100.0) {
+                    if (std::abs(up_peak.first) > std::abs(down_peak.first)) {
                         symbol_value = (int(round((up_peak.second + d_bin_num - d_preamble_bin) / (double)d_zero_padding_ratio))) % (1 << d_sf);
                         if (d_debug) {
                             fprintf(stderr, "css_frame_sync_impl::work: State STATE_SYNC_COMPLETE. Get symbol: %d\n",
@@ -713,8 +713,8 @@ int css_demodulate_symbols_impl::general_work(int noutput_items,
                     else {
                         d_state = STATE_PDU_OUTPUT;
                         if (d_debug) {
-                            fprintf(stderr, "css_frame_sync_impl::work: State STATE_SYNC_COMPLETE. Symbols ended. The up peak is low: %f\n",
-                                    up_peak.first);
+                            fprintf(stderr, "css_frame_sync_impl::work: State STATE_SYNC_COMPLETE. Symbols ended with downchirp. The up peak: %f, down peak is higher: %f\n",
+                                    up_peak.first, down_peak.first);
                         }
                         goto finish_symbol_processing;
                     }
