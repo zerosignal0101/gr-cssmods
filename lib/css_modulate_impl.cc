@@ -191,16 +191,16 @@ void css_modulate_impl::handle_pdu(pmt::pmt_t msg) {
     pmt::pmt_t metadata = pmt::car(msg);
     pmt::pmt_t vector = pmt::cdr(msg);
     
-    if (!pmt::is_u8vector(vector)) {
-        std::cerr << "Received invalid PDU (data not u8vector)" << std::endl;
+    if (!pmt::is_u32vector(vector)) {
+        std::cerr << "Received invalid PDU (data not u32vector)" << std::endl;
         return;
     }
     
     size_t pdu_len = pmt::length(vector);
-    const uint8_t* pdu_data = (const uint8_t*)pmt::uniform_vector_elements(vector, pdu_len);
+    const uint32_t* pdu_data = (const uint32_t*)pmt::u32vector_elements(vector, pdu_len);
     
     // Copy the PDU data to our queue
-    std::vector<uint8_t> new_pdu(pdu_data, pdu_data + pdu_len);
+    std::vector<uint32_t> new_pdu(pdu_data, pdu_data + pdu_len);
     d_pdu_queue.push_back(new_pdu);
     
     if (d_debug == true) {
@@ -268,6 +268,19 @@ int css_modulate_impl::general_work(int noutput_items,
     while (produced < items_to_produce) {
         // Check PDU completion
         if (!d_current_pdu.empty() && d_pdu_offset >= d_current_pdu.size()) {
+            if ((items_to_produce - produced) < d_chirp_len) {
+                if (d_debug) {
+                    std::cout << "[SUFFIX LEN] Insufficient space for single chirp (needs " 
+                              << d_chirp_len << ", available " << (items_to_produce-produced) 
+                              << ")" << std::endl;
+                }
+                break;
+            }
+
+            // Add an end down chirp
+            std::memcpy(out + produced, d_downchirp.data(), d_chirp_len * sizeof(std::complex<float>));
+            produced += d_chirp_len;
+
             if (d_debug) {
                 std::cout << "[PDU COMPLETE] Processed PDU (size=" 
                           << d_current_pdu.size() << "), offset=" << d_pdu_offset << std::endl;
@@ -344,7 +357,7 @@ int css_modulate_impl::general_work(int noutput_items,
             }
             
             for (int i = 0; i < chunk_size; ++i) {
-                int symbol = d_current_pdu[d_pdu_offset + i];
+                double symbol = float(d_current_pdu[d_pdu_offset + i]);
                 if (d_debug) {
                     std::cout << "    [SYMBOL " << i << "] value=" << symbol;
                     if (i == 0) std::cout << " (first)";
@@ -373,6 +386,14 @@ int css_modulate_impl::general_work(int noutput_items,
             }
             break;
         } 
+        else if (!d_current_pdu.empty()) {
+            // Re check the suffix adding, this type will not occur.
+            if (d_debug) {
+                std::cout << "[WAIT] PDU end chirp need " << d_chirp_len 
+                          << " samples to insert. (no PDU data in queue)" << std::endl;
+            }
+            break;
+        }
         else {
             int padding_size = (items_to_produce - produced);
             if (d_debug) {

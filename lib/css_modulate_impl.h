@@ -45,8 +45,8 @@ private:
     size_t d_header_len; // Total length of preamble, netid, sfd
 
     // PDU
-    std::deque<std::vector<uint8_t>> d_pdu_queue;
-    std::vector<uint8_t> d_current_pdu;
+    std::deque<std::vector<uint32_t>> d_pdu_queue;
+    std::vector<uint32_t> d_current_pdu;
     size_t d_pdu_offset;
     gr::thread::mutex d_mutex;
     void handle_pdu(pmt::pmt_t msg);

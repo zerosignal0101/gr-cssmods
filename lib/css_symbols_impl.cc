@@ -376,14 +376,7 @@ void css_symbols_impl::handle_payload_message(pmt::pmt_t msg)
     // 6. Gray Decoding
     std::vector<uint32_t> final_symbols = gray_decoding_helper(symbols_i);
     // --- End of Encoding Logic ---
-    // --- 转换为u8 vector ---
-    std::vector<uint8_t> final_symbols_u8;
-    final_symbols_u8.reserve(final_symbols.size()); // 预分配空间提高效率
-    for (const auto& val : final_symbols) {
-        final_symbols_u8.push_back(static_cast<uint8_t>(val)); // 安全截断到8位
-    }
-    // --- 更新PMT生成部分为u8格式 ---
-    pmt::pmt_t value = pmt::init_u8vector(final_symbols_u8.size(), final_symbols_u8.data());
+    pmt::pmt_t value = pmt::init_u32vector(final_symbols.size(), final_symbols.data());
     pmt::pmt_t output_msg = pmt::cons(pmt::make_dict(), value);
     // 发布消息
     message_port_pub(pmt::mp("out"), output_msg);
