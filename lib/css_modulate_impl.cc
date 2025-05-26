@@ -416,7 +416,7 @@ int css_modulate_impl::general_work(int noutput_items,
                     }
                     d_pdu_offset += chunk_size;
                 } 
-                else if (remaining_pdu > 0 || !d_pdu_queue.empty()) {
+                else if (remaining_pdu > 0) {
                     if (d_debug) {
                         std::cout << "[WAIT] PDU data available (remaining=" << remaining_pdu 
                                 << ", queue=" << d_pdu_queue.size() 
@@ -484,6 +484,12 @@ int css_modulate_impl::general_work(int noutput_items,
                                 std::to_string(d_target_items) + 
                                 ") exceed threshold (1,000,000). Cannot generate and send data in real-time.";
             std::cerr << "[WARNING] " << error_msg << std::endl;
+            std::cerr << "[INFO] " << "Current state: " << d_state << std::endl;
+            std::cerr << "[INFO] " << "PDU queue size: " << d_pdu_queue.size() << std::endl;
+            std::cerr << "[INFO] " << "PDU Offset: " << d_pdu_offset << std::endl;
+            std::cerr << "[INFO] " << "Current PDU size: " << d_current_pdu.size() << std::endl;
+            std::cerr << "[INFO] " << "Current produced: " << produced << std::endl;
+            std::cerr << "[INFO] " << "Current noutputitem: " << noutput_items << std::endl;
         }
     }
 
