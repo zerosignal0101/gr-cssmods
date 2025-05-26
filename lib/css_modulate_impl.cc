@@ -437,7 +437,7 @@ int css_modulate_impl::general_work(int noutput_items,
                                 << d_chirp_len << ", available " << (items_to_produce-produced) 
                                 << ")" << std::endl;
                     }
-                    break;
+                    goto complete_produce;
                 }
 
                 // Add an end down chirp
