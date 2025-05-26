@@ -1,0 +1,45 @@
+id: cssmods_css_symbols_decode
+label: CSS Symbols Decode
+category: '[cssmods]'
+
+templates:
+  imports: from gnuradio import cssmods
+  make: cssmods.css_symbols_decode(${sf}, ${cr}, ${ldr})
+
+parameters:
+-   id: sf
+    label: Spreading Factor
+    dtype: int
+    default: 7
+    options: [7, 8, 9, 10, 11, 12]
+    option_labels: [SF7, SF8, SF9, SF10, SF11, SF12]
+-   id: cr
+    label: Coding Rate (1-4 for 4/5 to 4/8)
+    dtype: int
+    default: 1 # 4/5
+    options: [1, 2, 3, 4]
+    option_labels: ["4/5", "4/6", "4/7", "4/8"]
+-   id: ldr
+    label: Low Data Rate Optimization
+    dtype: bool
+    default: false
+    options: [True, False]
+    option_labels: [Enabled, Disabled]
+
+inputs:
+- domain: message
+  id: in
+  label: in
+  optional: false
+outputs:
+- domain: message
+  id: out
+  label: out
+  optional: false
+
+file_format: 1
+documentation: |
+  Decodes LoRa CSS symbols to bytes.
+
+  Input PDUs should contain a u32vector of symbols.
+  Output PDUs will contain a u8vector of decoded bytes.

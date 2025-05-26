@@ -24,6 +24,7 @@ namespace py = pybind11;
     void bind_css_modulate(py::module& m);
     void bind_css_symbols(py::module& m);
     void bind_css_demodulate_symbols(py::module& m);
+    void bind_css_symbols_decode(py::module& m);
 // ) END BINDING_FUNCTION_PROTOTYPES
 
 
@@ -55,5 +56,6 @@ PYBIND11_MODULE(cssmods_python, m)
     bind_css_modulate(m);
     bind_css_symbols(m);
     bind_css_demodulate_symbols(m);
+    bind_css_symbols_decode(m);
     // ) END BINDING_FUNCTION_CALLS
 }

@@ -739,6 +739,7 @@ int css_demodulate_symbols_impl::general_work(int noutput_items,
                 if (d_debug) {
                     fprintf(stderr, "css_frame_sync_impl::work: State STATE_PDU_OUTPUT. Output a PDU consists of symbols.\n");
                 }
+                d_final_symbols.clear();
                 d_state = STATE_SEARCHING_PREAMBLE;
             break;
         }

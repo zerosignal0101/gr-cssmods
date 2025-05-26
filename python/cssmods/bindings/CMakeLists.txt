@@ -30,7 +30,8 @@ include(GrPybind)
 list(APPEND cssmods_python_files
     css_modulate_python.cc
     css_symbols_python.cc
-    css_demodulate_symbols_python.cc python_bindings.cc)
+    css_demodulate_symbols_python.cc
+    css_symbols_decode_python.cc python_bindings.cc)
 
 GR_PYBIND_MAKE_OOT(cssmods
    ../../..

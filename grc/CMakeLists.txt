@@ -8,5 +8,6 @@
 install(FILES
     cssmods_css_modulate.block.yml
     cssmods_css_symbols.block.yml
-    cssmods_css_demodulate_symbols.block.yml DESTINATION share/gnuradio/grc/blocks
+    cssmods_css_demodulate_symbols.block.yml
+    cssmods_css_symbols_decode.block.yml DESTINATION share/gnuradio/grc/blocks
 )
