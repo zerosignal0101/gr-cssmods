@@ -406,8 +406,6 @@ void css_symbols_decode_impl::dewhiten_impl(
         std::cerr << "css_symbols: Whitening sequence too short for payload length "
                   << plen << std::endl;
         // Handle error - maybe regenerate a longer sequence or throw
-        // For simplicity, let's resize the sequence (inefficient if done often)
-        d_whitening_seq = generate_whitening_seq(plen);
     }
     if (d_whitening_seq.empty()) {
         std::cerr << "Dewhitening called with empty whitening sequence. Output will be same as input." << std::endl;

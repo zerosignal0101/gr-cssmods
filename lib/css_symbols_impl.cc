@@ -308,8 +308,6 @@ void css_symbols_impl::handle_payload_message(pmt::pmt_t msg)
         std::cerr << "css_symbols: Whitening sequence too short for payload length "
                   << plen << std::endl;
         // Handle error - maybe regenerate a longer sequence or throw
-        // For simplicity, let's resize the sequence (inefficient if done often)
-        d_whitening_seq = generate_whitening_seq(plen);
     }
     for (size_t i = 0; i < plen; ++i) {
         data_w[i] = data_w[i] ^ d_whitening_seq[i];
