@@ -642,10 +642,8 @@ int css_demodulate_symbols_impl::general_work(int noutput_items,
                 }
 
                 if (d_debug) {
-                     fprintf(stderr, "css_frame_sync_impl::work: !!!!! LoRa Frame Sync Found! Tag added at absolute position %ld. Calculated CFO: %f Hz. !!!!!\n", x_sync, d_cfo);
-                } else {
-                     // Always print the final sync message, even if debug is off
-                     fprintf(stderr, "!!!!! css_frame_sync: Frame Sync Found at absolute position %ld. !!!!!\n Last preamble_bin: %ld (0-based), cfo calculated: %.3f\n"
+                    // Always print the final sync message, even if debug is off
+                    fprintf(stderr, "!!!!! css_frame_sync: Frame Sync Found at absolute position %ld. !!!!!\n Last preamble_bin: %ld (0-based), cfo calculated: %.3f\n"
                         , x_sync, d_preamble_bin, d_cfo);
                 }
 
