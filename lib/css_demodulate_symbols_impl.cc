@@ -404,11 +404,10 @@ int css_demodulate_symbols_impl::general_work(int noutput_items,
 
                                 // Apply the calculated sample offset to the current search position
                                 d_current_search_pos = d_current_search_pos + sto_move_delta; // Update based on original position + offset
-                                
-                                current_symbol_start_in_buffer = d_current_search_pos - abs_read_pos; // Offset from 'in'
-                                up_peak = dechirp(in, current_symbol_start_in_buffer, true, d_sample_num, d_fft, d_fft_len, d_bin_num, d_upchirp, d_downchirp);
 
                                 if (d_debug) {
+                                    current_symbol_start_in_buffer = d_current_search_pos - abs_read_pos; // Offset from 'in'
+                                    up_peak = dechirp(in, current_symbol_start_in_buffer, true, d_sample_num, d_fft, d_fft_len, d_bin_num, d_upchirp, d_downchirp);
                                     // 测试 d_current_search_pos 附近的偏移
                                     fprintf(stderr, "\nTesting around d_current_search_pos (%ld):\n", d_current_search_pos);
                                     for (int offset = -d_sample_num; offset <= d_sample_num; offset += 8) {
