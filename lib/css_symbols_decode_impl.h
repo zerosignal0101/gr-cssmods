@@ -13,6 +13,16 @@
 namespace gr {
 namespace cssmods {
 
+template<typename T>
+void print_int_vector(const std::vector<T>& vec, 
+                    const std::string& name, 
+                    size_t max_print);
+
+
+// Optional helper to print binary representations (like MATLAB's print_bin)
+void print_binary_vector(const std::string& label, const std::vector<unsigned int>& data, int bits_per_symbol);
+
+
 class css_symbols_decode_impl : public css_symbols_decode
 {
 private:
@@ -22,14 +32,15 @@ private:
 
     std::vector<uint8_t> d_whitening_seq;
 
+    bool d_debug;
+
     // --- Auxiliary functions (transplanted from MATLAB) ---
 
     void gray_coding_impl(const std::vector<uint32_t>& din_const,
                           std::vector<uint16_t>& symbols_out);
 
-    void diag_deinterleave_impl(const std::vector<uint16_t>& symbols_in,
-                                int ppm,
-                                std::vector<uint16_t>& codewords_out);
+    std::vector<uint16_t> diag_deinterleave_impl(
+                            const std::vector<uint16_t>& symbols, int ppm);
     
     uint8_t bit_reduce(uint16_t codeword, const std::vector<int>& zero_indexed_lsb_positions);
     uint16_t parity_fix(uint8_t p_syndrome);

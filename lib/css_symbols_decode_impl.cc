@@ -11,6 +11,53 @@
 namespace gr {
 namespace cssmods {
 
+template<typename T>
+void print_int_vector(const std::vector<T>& vec, 
+                    const std::string& name, 
+                    size_t max_print) 
+{
+    std::cout << "----- " << name << " (size=" << vec.size() << ") -----" << std::endl;
+    
+    std::cout << "MATLAB format: [";
+    size_t print_count = std::min(max_print, vec.size());
+    for (size_t i = 0; i < print_count; ++i) {
+        std::cout << static_cast<int>(vec[i]);
+        if (i < print_count - 1) {
+            std::cout << ", ";
+        }
+    }
+    
+    if (vec.size() > max_print) {
+        std::cout << ", ...";
+    }
+    
+    std::cout << "]" << std::endl;
+    
+    if (vec.size() > max_print) {
+        std::cout << "... (showing first " << max_print << " of " << vec.size() << " elements)" << std::endl;
+    }
+    
+    std::cout << "------------------------" << std::endl;
+}
+
+
+// Optional helper to print binary representations (like MATLAB's print_bin)
+void print_binary_vector(const std::string& label, const std::vector<uint16_t>& data, int bits_per_symbol) {
+    std::cout << label << ":" << std::endl;
+    if (data.empty()) {
+        std::cout << "  (empty)" << std::endl;
+        return;
+    }
+    for (uint16_t val : data) {
+        std::cout << "  ";
+        for (int i = bits_per_symbol - 1; i >= 0; --i) {
+            std::cout << ((val >> i) & 1);
+        }
+        std::cout << " (" << val << ")" << std::endl;
+    }
+}
+
+
 css_symbols_decode::sptr css_symbols_decode::make(int sf, int cr, bool ldr)
 {
     return gnuradio::make_block_sptr<css_symbols_decode_impl>(sf, cr, ldr);
@@ -26,7 +73,8 @@ css_symbols_decode_impl::css_symbols_decode_impl(int sf, int cr, bool ldr)
                 gr::io_signature::make(0, 0, 0)),
     d_sf(sf),
     d_cr(cr),
-    d_ldr(ldr)
+    d_ldr(ldr),
+    d_debug(true)
 {
     // Validate parameters
     if (d_sf < 7 || d_sf > 12) {
@@ -82,18 +130,13 @@ void css_symbols_decode_impl::gray_coding_impl(
     symbols_out.resize(din.size());
 
     for (size_t i = 0; i < din.size(); ++i) {
-        if (i < 8) {
+        if (d_ldr) {
             din[i] = static_cast<uint32_t>(std::floor(static_cast<double>(din[i]) / 4.0));
         } else {
-            if (d_ldr) {
-                din[i] = static_cast<uint32_t>(std::floor(static_cast<double>(din[i]) / 4.0));
-            } else {
-                // MATLAB: mod(din(9:end)-1, 2^self.sf);
-                // Ensure positive result for modulo of potentially negative (din[i]-1)
-                long val = static_cast<long>(din[i]) - 1;
-                long mod_val = 1L << d_sf; // 2^sf
-                din[i] = static_cast<uint32_t>((val % mod_val + mod_val) % mod_val);
-            }
+            // Ensure positive result for modulo of potentially negative (din[i]-1)
+            long val = static_cast<long>(din[i]) - 1;
+            long mod_val = 1L << d_sf; // 2^sf
+            din[i] = static_cast<uint32_t>((val % mod_val + mod_val) % mod_val);
         }
     }
 
@@ -103,65 +146,108 @@ void css_symbols_decode_impl::gray_coding_impl(
     }
 }
 
-void css_symbols_decode_impl::diag_deinterleave_impl(
-    const std::vector<uint16_t>& symbols_in, int ppm, std::vector<uint16_t>& codewords_out)
+std::vector<uint16_t> css_symbols_decode_impl::diag_deinterleave_impl(
+    const std::vector<uint16_t>& symbols, int ppm)
 {
-    if (symbols_in.empty() || ppm <= 0) {
-        codewords_out.clear();
-        return;
+    if (symbols.empty() || ppm <= 0) {
+        return {}; // Return empty if invalid input
     }
-    size_t num_symbols = symbols_in.size(); // S in MATLAB example
-    
-    // 1. de2bi: Convert symbols to binary matrix `b` (num_symbols x ppm)
-    std::vector<std::vector<uint8_t>> b(num_symbols, std::vector<uint8_t>(ppm));
-    for (size_t i = 0; i < num_symbols; ++i) {
-        for (int j = 0; j < ppm; ++j) {
-            // 'left-msb': MSB is bit (ppm-1), LSB is bit 0
-            // So, (ppm-1-j) gives correct bit index for MSB-first storage
-            b[i][j] = (symbols_in[i] >> (ppm - 1 - j)) & 1;
+
+    size_t num_input_symbols = symbols.size(); // N in MATLAB context
+
+    // 1. de2bi equivalent: Convert symbols to binary matrix `b_matrix` (N x ppm)
+    // Each inner vector is a row representing a symbol's bits (MSB first)
+    std::vector<std::vector<int>> b_matrix(num_input_symbols, std::vector<int>(ppm));
+    for (size_t i = 0; i < num_input_symbols; ++i) {
+        uint16_t current_symbol = symbols[i];
+        for (int j = ppm - 1; j >= 0; --j) {
+            b_matrix[i][ppm - 1 - j] = (current_symbol >> j) & 1;
         }
     }
 
-    // 2. circshift each row: `m_shifted` (num_symbols x ppm)
-    std::vector<std::vector<uint8_t>> m_shifted = b;
-    for (size_t i = 0; i < num_symbols; ++i) { // i is 0-indexed symbol
-        int matlab_x = i + 1;
-        int shift_val = 1 - matlab_x; // MATLAB: 1-x
-        
-        std::vector<uint8_t>& row_to_shift = m_shifted[i];
-        if (ppm == 0) continue; // Avoid modulo by zero
+    // For debugging: Print b_matrix
+    // std::cout << "b_matrix (N x ppm):" << std::endl;
+    // for (size_t i = 0; i < num_input_symbols; ++i) {
+    //     std::cout << "  ";
+    //     for (int j = 0; j < ppm; ++j) {
+    //         std::cout << b_matrix[i][j] << " ";
+    //     }
+    //     std::cout << std::endl;
+    // }
 
-        if (shift_val < 0) { // left circular shift
-            int s = (-shift_val) % ppm;
-            std::rotate(row_to_shift.begin(), row_to_shift.begin() + s, row_to_shift.end());
-        } else if (shift_val > 0) { // right circular shift
-            int s = shift_val % ppm;
-            std::rotate(row_to_shift.rbegin(), row_to_shift.rbegin() + s, row_to_shift.rend());
+    // 2. circshift equivalent and cell2mat: Create `shifted_b_matrix` (N x ppm)
+    std::vector<std::vector<int>> shifted_b_matrix(num_input_symbols, std::vector<int>(ppm));
+    for (size_t i = 0; i < num_input_symbols; ++i) {
+        // MATLAB x is 1-indexed, so x = i + 1
+        // Shift amount is 1 - x = 1 - (i + 1) = -i
+        // Negative shift means left circular shift.
+        // Positive shift means right circular shift.
+        // circshift(row, k): if k > 0, shifts right; if k < 0, shifts left.
+        // A shift of -i (left by i) is equivalent to a right shift of (ppm - (i % ppm)) % ppm if i > 0
+        // Or more simply: new_idx = (old_idx - shift_amount + ppm) % ppm for right shift
+        // new_idx = (old_idx + shift_amount + ppm) % ppm for left shift
+        // Here, shift is `k_shift = - (int)i;`
+        // `shifted_row[new_j] = original_row[j]`
+        // `original_row[j]` moves to `(j + k_shift) mod ppm`
+        // So, `shifted_row[ (j + k_shift % ppm + ppm) % ppm ] = original_row[j]`
+        // Or, `shifted_row[j_target] = original_row[ (j_target - k_shift % ppm + ppm) % ppm ]`
+
+        // Easier: element at original_row[j_orig] goes to shifted_row[ (j_orig + shift_val) % ppm ]
+        // So, shifted_row[j_new] = original_row[ (j_new - shift_val % ppm + ppm) % ppm ]
+        // shift_val = - (int)i; (left shift by i)
+        // shifted_b_matrix[i][j_col] = b_matrix[i][ (j_col - (-(int)i) % ppm + ppm) % ppm ]
+        //                            = b_matrix[i][ (j_col + (int)i) % ppm ]
+
+        for (int j_col = 0; j_col < ppm; ++j_col) {
+             shifted_b_matrix[i][j_col] = b_matrix[i][(j_col + (int)i) % ppm];
         }
-        // if shift_val == 0, no change
     }
 
-    // 3. Transpose `m_shifted` to get `m_shifted_transposed` (ppm x num_symbols)
-    std::vector<std::vector<uint8_t>> m_shifted_transposed(ppm, std::vector<uint8_t>(num_symbols));
-    for (int r = 0; r < ppm; ++r) {
-        for (size_t c = 0; c < num_symbols; ++c) {
-            m_shifted_transposed[r][c] = m_shifted[c][r];
-        }
-    }
-    
-    // 4. flipud `m_shifted_transposed` to get `m_flipped` (ppm x num_symbols)
-    std::vector<std::vector<uint8_t>> m_flipped = m_shifted_transposed;
-    std::reverse(m_flipped.begin(), m_flipped.end());
+    // For debugging: Print shifted_b_matrix
+    // std::cout << "shifted_b_matrix (N x ppm):" << std::endl;
+    // for (size_t i = 0; i < num_input_symbols; ++i) {
+    //     std::cout << "  ";
+    //     for (int j = 0; j < ppm; ++j) {
+    //         std::cout << shifted_b_matrix[i][j] << " ";
+    //     }
+    //     std::cout << std::endl;
+    // }
 
-    // 5. bi2de (columns of m_flipped): output `num_symbols` codewords, each of `ppm` bits
-    codewords_out.assign(num_symbols, 0); // Output has num_symbols elements
-    for (size_t j_col = 0; j_col < num_symbols; ++j_col) { // Iterate through columns of m_flipped
-        uint16_t current_codeword = 0;
-        for (int i_row = 0; i_row < ppm; ++i_row) { // Iterate through rows (bits of codeword, MSB first)
-            current_codeword = (current_codeword << 1) | m_flipped[i_row][j_col];
+    // 3. Transpose: Create `transposed_matrix` (ppm x N)
+    std::vector<std::vector<int>> transposed_matrix(ppm, std::vector<int>(num_input_symbols));
+    for (int i = 0; i < ppm; ++i) { // iterating rows of transposed matrix (0 to ppm-1)
+        for (size_t j = 0; j < num_input_symbols; ++j) { // iterating columns of transposed matrix (0 to N-1)
+            transposed_matrix[i][j] = shifted_b_matrix[j][i];
         }
-        codewords_out[j_col] = current_codeword;
     }
+
+    // For debugging: Print transposed_matrix
+    // std::cout << "transposed_matrix (ppm x N):" << std::endl;
+    // for (int i = 0; i < ppm; ++i) {
+    //     std::cout << "  ";
+    //     for (size_t j = 0; j < num_input_symbols; ++j) {
+    //         std::cout << transposed_matrix[i][j] << " ";
+    //     }
+    //     std::cout << std::endl;
+    // }
+
+    // 4. bi2de equivalent: Convert rows of `transposed_matrix` to decimal
+    // The output will have `ppm` elements.
+    std::vector<uint16_t> codewords_intermediate(ppm);
+    for (int i = 0; i < ppm; ++i) { // For each row in transposed_matrix
+        uint16_t decimal_value = 0;
+        for (size_t j = 0; j < num_input_symbols; ++j) { // For each bit in that row
+            // MSB is at index 0 (leftmost)
+            decimal_value = (decimal_value << 1) | transposed_matrix[i][j];
+        }
+        codewords_intermediate[i] = decimal_value;
+    }
+
+    // 5. flipud equivalent: Reverse the order of elements
+    std::vector<uint16_t> codewords = codewords_intermediate;
+    std::reverse(codewords.begin(), codewords.end());
+
+    return codewords;
 }
 
 // Helper to XOR specific bits of a codeword.
@@ -325,23 +411,38 @@ void css_symbols_decode_impl::dewhiten_impl(
 // Main PDU processing function
 void css_symbols_decode_impl::work_on_pdu(pmt::pmt_t msg)
 {
+    if (d_debug) {
+        std::cout << "===== ENTERING work_on_pdu =====" << std::endl;
+    }
+
     // Check if this is a valid PDU
     if (!pmt::is_pair(msg)) {
         std::cerr << "Received invalid PDU (not a pair)" << std::endl;
+        if (d_debug) {
+            std::cout << "PDU validation failed - not a pair" << std::endl;
+        }
         return;
     }
 
-    // const pmt::pmt_t meta = msg->car(); // Metadata, not used here but can be propagated
     const pmt::pmt_t payload_blob = pmt::cdr(msg);
 
     if (!pmt::is_u32vector(payload_blob)) {
-        std::cerr << ("PDU payload is not a u32vector. Ignoring.") << std::endl;
+        std::cerr << "PDU payload is not a u32vector. Ignoring." << std::endl;
+        if (d_debug) {
+            std::cout << "Invalid payload type - expected u32vector" << std::endl;
+        }
         return;
     }
 
     const std::vector<uint32_t> symbols_m_pkt = pmt::u32vector_elements(payload_blob);
+    if (d_debug) {
+        std::cout << "Received PDU with " << symbols_m_pkt.size() << " symbols" << std::endl;
+    }
+
     if (symbols_m_pkt.empty()) {
-        // Send an empty PDU or just return
+        if (d_debug) {
+            std::cout << "Empty PDU received - sending empty output" << std::endl;
+        }
         pmt::pmt_t out_payload = pmt::init_u8vector(0, nullptr);
         message_port_pub(pmt::mp("out"), pmt::cons(pmt::PMT_NIL, out_payload));
         return;
@@ -351,7 +452,15 @@ void css_symbols_decode_impl::work_on_pdu(pmt::pmt_t msg)
     std::vector<uint16_t> symbols_g;
     gray_coding_impl(symbols_m_pkt, symbols_g);
 
+    if (d_debug) {
+        std::cout << "After gray coding: " << symbols_g.size() << " symbols" << std::endl;
+        print_int_vector(symbols_g, "Symbols g: ", 40);
+    }
+
     if (symbols_g.empty()) { // Should not happen if symbols_m_pkt was not empty
+        if (d_debug) {
+            std::cout << "Unexpected empty output from gray coding" << std::endl;
+        }
         pmt::pmt_t out_payload = pmt::init_u8vector(0, nullptr);
         message_port_pub(pmt::mp("out"), pmt::cons(pmt::PMT_NIL, out_payload));
         return;
@@ -363,25 +472,52 @@ void css_symbols_decode_impl::work_on_pdu(pmt::pmt_t msg)
     int rdd_loop = d_cr + 4;
     int ppm_loop = d_sf - 2 * (d_ldr ? 1 : 0); // ppm for payload part
 
+    if (d_debug) {
+        std::cout << "Decoding parameters - rdd_loop: " << rdd_loop 
+                  << ", ppm_loop: " << ppm_loop << std::endl;
+    }
+
     if (rdd_loop > 0) { // Ensure rdd_loop is positive to avoid infinite loop or other issues
+        if (d_debug) {
+            std::cout << "Starting chunk processing with chunk size " << rdd_loop 
+                      << " and " << symbols_g.size() << " total symbols" << std::endl;
+        }
+        
         for (size_t ii = 0; (ii + rdd_loop) <= symbols_g.size(); ii += rdd_loop) {
-            std::vector<uint16_t> chunk_symbols(symbols_g.begin() + ii, 
-                                                symbols_g.begin() + ii + rdd_loop);
+            if (d_debug) {
+                std::cout << "Processing chunk starting at index " << ii << std::endl;
+            }
             
-            std::vector<uint16_t> codewords_loop;
-            diag_deinterleave_impl(chunk_symbols, ppm_loop, codewords_loop);
+            std::vector<uint16_t> chunk_symbols(symbols_g.begin() + ii, 
+                                            symbols_g.begin() + ii + rdd_loop);
+
+            std::vector<uint16_t> codewords_loop = diag_deinterleave_impl(chunk_symbols, ppm_loop);
+
+            if (d_debug) {
+                print_int_vector(chunk_symbols, "Chunk symbols: ", 20);
+                std::cout << "  After deinterleaving: " << codewords_loop.size() 
+                          << " codewords" << std::endl;
+                print_int_vector(codewords_loop, "Codewords: ", 40);
+            }
 
             std::vector<uint8_t> nibbles_loop;
             hamming_decode_impl(codewords_loop, rdd_loop, nibbles_loop);
+            
+            if (d_debug) {
+                std::cout << "  After Hamming decode: " << nibbles_loop.size() 
+                          << " nibbles" << std::endl;
+            }
+            
             all_nibbles.insert(all_nibbles.end(), nibbles_loop.begin(), nibbles_loop.end());
         }
     }
 
+    if (d_debug) {
+        std::cout << "Total nibbles collected: " << all_nibbles.size() << std::endl;
+        print_int_vector(all_nibbles, "All nibbles: ", 40);
+    }
 
     // Combine nibbles to bytes
-    // MATLAB: bytes(ii) = bitor(uint8(nibbles(2*ii-1)), 16*uint8(nibbles(2*ii)));
-    // MSN = nibbles(2*ii), LSN = nibbles(2*ii-1) (1-based MATLAB)
-    // C++ 0-based: MSN = all_nibbles[2*i+1], LSN = all_nibbles[2*i]
     std::vector<uint8_t> combined_bytes;
     if (all_nibbles.size() >= 2) {
         combined_bytes.reserve(all_nibbles.size() / 2);
@@ -392,25 +528,48 @@ void css_symbols_decode_impl::work_on_pdu(pmt::pmt_t msg)
         }
     }
     
+    if (d_debug) {
+        std::cout << "Combined bytes: " << combined_bytes.size() << std::endl;
+        if (!combined_bytes.empty()) {
+            std::cout << "First few bytes (hex):";
+            for (size_t i = 0; i < std::min(static_cast<size_t>(5), combined_bytes.size()); ++i) {
+                std::cout << " 0x" << std::hex << static_cast<int>(combined_bytes[i]);
+            }
+            std::cout << std::dec << std::endl;
+        }
+    }
+
     // Dewhitening
     std::vector<uint8_t> dewhitened_data;
-    // Use d_payload_len to determine how many bytes to dewhiten from combined_bytes
-    // If combined_bytes is shorter than d_payload_len, dewhiten all available.
-    // If combined_bytes is longer, dewhiten only up to d_payload_len.
     size_t len_to_dewhiten = combined_bytes.size();
     
     if (len_to_dewhiten > 0) {
-        std::vector<uint8_t> bytes_to_dewhiten(combined_bytes.begin(), combined_bytes.begin() + len_to_dewhiten);
+        std::vector<uint8_t> bytes_to_dewhiten(combined_bytes.begin(), 
+                                             combined_bytes.begin() + len_to_dewhiten);
         dewhiten_impl(bytes_to_dewhiten, dewhitened_data);
     }
-    // If d_payload_len is 0 or not meaningful, one might choose to dewhiten all combined_bytes.
-    // For now, strictly use d_payload_len.
+
+    if (d_debug) {
+        std::cout << "After dewhitening: " << dewhitened_data.size() << " bytes" << std::endl;
+        if (!dewhitened_data.empty()) {
+            std::cout << "First few dewhitened bytes (hex):";
+            for (size_t i = 0; i < std::min(static_cast<size_t>(5), dewhitened_data.size()); ++i) {
+                std::cout << " 0x" << std::hex << static_cast<int>(dewhitened_data[i]);
+            }
+            std::cout << std::dec << std::endl;
+        }
+    }
 
     // Send the PDU
     pmt::pmt_t out_payload = pmt::init_u8vector(dewhitened_data.size(), dewhitened_data.data());
-    // Propagate metadata if needed: pmt::cons(meta, out_payload)
-    message_port_pub(pmt::mp("out"), pmt::cons(pmt::make_dict(), out_payload)); 
+    message_port_pub(pmt::mp("out"), pmt::cons(pmt::make_dict(), out_payload));
+
+    if (d_debug) {
+        std::cout << "Sent output PDU with " << dewhitened_data.size() << " bytes" << std::endl;
+        std::cout << "===== EXITING work_on_pdu =====" << std::endl;
+    }
 }
+
 
 void css_symbols_decode_impl::forecast(int noutput_items,
                                        gr_vector_int& ninput_items_required)

@@ -194,8 +194,7 @@ css_symbols_impl::gray_decoding_helper(const std::vector<uint32_t>& interleaved_
             mask = mask >> 1;
         }
         // Apply final transformation
-        if (i < 8 ||
-            d_ldr) { // Matlab uses 1-based index i, so i <= 8 -> 0-based index i < 8
+        if (d_ldr) {
             symbols[i] = (non_gray_num * 4 + 1) % symbol_mod;
         } else {
             symbols[i] = (non_gray_num + 1) % symbol_mod;
