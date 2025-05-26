@@ -134,7 +134,11 @@ css_modulate_impl::css_modulate_impl(
       d_items_per_us(fs / 1e6),
       d_target_items(0),
       d_upchirp(),
-      d_downchirp()
+      d_downchirp(),
+      d_state(IDLE), // Initialize state
+      d_preamble_counter(0), // Initialize preamble counter
+      d_netid_counter(0),    // Initialize NetID counter
+      d_sfd_counter(0)       // Initialize SFD counter
 {
     // Validate parameters if necessary
     if (sf < 7 || sf > 12) throw std::runtime_error("LoRa SF must be between 7 and 12");
@@ -266,147 +270,207 @@ int css_modulate_impl::general_work(int noutput_items,
 
     int produced = 0;
     while (produced < items_to_produce) {
-        // Check PDU completion
-        if (!d_current_pdu.empty() && d_pdu_offset >= d_current_pdu.size()) {
-            if ((items_to_produce - produced) < d_chirp_len) {
-                if (d_debug) {
-                    std::cout << "[SUFFIX LEN] Insufficient space for single chirp (needs " 
-                              << d_chirp_len << ", available " << (items_to_produce-produced) 
-                              << ")" << std::endl;
+        switch (d_state) {
+            case IDLE: {
+                // Start new PDU if needed
+                if (d_current_pdu.empty() && !d_pdu_queue.empty()) {
+                    d_current_pdu = d_pdu_queue.front();
+                    d_pdu_queue.pop_front();
+                    d_pdu_offset = 0;
+                    d_state = PREAMBLE; // Transition to PREAMBLE state
+                } else {
+                    // No PDU, produce padding
+                    size_t padding_size = (items_to_produce - produced);
+                    if (d_debug && padding_size > 0) {
+                        std::cout << "[STATE] IDLE. Padding " << padding_size << " samples." << std::endl;
+                    }
+                    for (size_t i = 0; i < padding_size; i++) {
+                        out[produced + i] = {0.0f, 0.0f}; // Output zero samples
+                    }
+                    produced += padding_size;
+                    // Stay in IDLE, consumed all available output space with padding or had nothing to do
+                    goto complete_produce; // Exit switch, will likely exit while loop
                 }
-                break;
             }
-
-            // Add an end down chirp
-            std::memcpy(out + produced, d_downchirp.data(), d_chirp_len * sizeof(std::complex<float>));
-            produced += d_chirp_len;
-
-            if (d_debug) {
-                std::cout << "[PDU COMPLETE] Processed PDU (size=" 
-                          << d_current_pdu.size() << "), offset=" << d_pdu_offset << std::endl;
-            }
-            d_current_pdu.clear();
-            d_pdu_offset = 0;
-        }
-
-        // Start new PDU if needed
-        if (d_current_pdu.empty() && !d_pdu_queue.empty()) {
-            if ((items_to_produce - produced) < d_header_len) {
-                if (d_debug) {
-                    std::cout << "[HEADER LEN] Insufficient space for header (needs " 
-                              << d_header_len << ", available " << (items_to_produce-produced) 
-                              << ")" << std::endl;
+            // Fallthrough to PREAMBLE state if new PDU is found
+            [[fallthrough]]
+            
+            case PREAMBLE: {
+                if ((items_to_produce - produced) < d_chirp_len) {
+                    if (d_debug) {
+                        std::cout << "[PREAMBLE] Insufficient space for single chirp (needs " 
+                                << d_chirp_len << ", available " << (items_to_produce-produced) 
+                                << ")" << std::endl;
+                    }
+                    goto complete_produce;
                 }
-                break;
-            }
 
-            d_current_pdu = d_pdu_queue.front();
-            d_pdu_queue.pop_front();
-            d_pdu_offset = 0;
+                if (d_debug) {
+                    std::cout << "[NEW PDU] Starting PDU (size=" << d_current_pdu.size() 
+                            << "), queue remaining=" << d_pdu_queue.size() << std::endl;
+                    std::cout << "  [PREAMBLE] Adding " << d_preamble_len << " upchirps" << std::endl;
+                }
 
-            if (d_debug) {
-                std::cout << "[NEW PDU] Starting PDU (size=" << d_current_pdu.size() 
-                          << "), queue remaining=" << d_pdu_queue.size() << std::endl;
-                std::cout << "  [PREAMBLE] Adding " << d_preamble_len << " upchirps" << std::endl;
-            }
-
-            // Add preamble
-            for (int i = 0; i < d_preamble_len; ++i) {
                 std::memcpy(out + produced, d_upchirp.data(), d_chirp_len * sizeof(std::complex<float>));
                 produced += d_chirp_len;
-            }
 
-            if (d_debug) {
-                std::cout << "  [NETID] Adding NetID chirps (24 & 32)" << std::endl;
-            }
-            // Add NetID
-            std::vector<std::complex<float>> netid1_chirp = generate_lora_chirp(true, d_sf, d_bw, d_fs, 24, d_cfo);
-            std::vector<std::complex<float>> netid2_chirp = generate_lora_chirp(true, d_sf, d_bw, d_fs, 32, d_cfo);
-            std::memcpy(out + produced, netid1_chirp.data(), d_chirp_len * sizeof(std::complex<float>));
-            produced += d_chirp_len;
-            std::memcpy(out + produced, netid2_chirp.data(), d_chirp_len * sizeof(std::complex<float>));
-            produced += d_chirp_len;
+                d_preamble_counter += 1;
 
-            if (d_debug) {
-                std::cout << "  [SFD] Adding SFD (2 downchirps + partial)" << std::endl;
-            }
-            // Add SFD
-            std::memcpy(out + produced, d_downchirp.data(), d_chirp_len * sizeof(std::complex<float>));
-            produced += d_chirp_len;
-            std::memcpy(out + produced, d_downchirp.data(), d_chirp_len * sizeof(std::complex<float>));
-            produced += d_chirp_len;
-            std::memcpy(out + produced, d_downchirp.data(), d_sfd_len * sizeof(std::complex<float>));
-            produced += d_sfd_len;
-        }
-
-        // Data processing
-        int remaining_request = (items_to_produce - produced) / d_chirp_len;
-        int remaining_pdu = d_current_pdu.empty() ? 0 : (d_current_pdu.size() - d_pdu_offset);
-        int chunk_size = std::min(remaining_request, remaining_pdu);
-
-        if (d_debug) {
-            std::cout << "[DATA] remaining_request=" << remaining_request 
-                      << ", remaining_pdu=" << remaining_pdu 
-                      << ", chunk_size=" << chunk_size << std::endl;
-        }
-
-        if (chunk_size > 0) {
-            if (d_debug) {
-                std::cout << "  [PROCESSING] Writing " << chunk_size << " data symbols (offset=" 
-                          << d_pdu_offset << ")" << std::endl;
-            }
-            
-            for (int i = 0; i < chunk_size; ++i) {
-                double symbol = float(d_current_pdu[d_pdu_offset + i]);
-                if (d_debug) {
-                    std::cout << "    [SYMBOL " << i << "] value=" << symbol;
-                    if (i == 0) std::cout << " (first)";
-                    if (i == chunk_size-1) std::cout << " (last)";
-                    std::cout << std::endl;
-                }
-                
-                std::vector<std::complex<float>> data_chirp = generate_lora_chirp(true, d_sf, d_bw, d_fs, symbol, d_cfo);
-                if (data_chirp.size() != d_chirp_len) {
+                // Check if all preamble chirps are finished
+                if (d_preamble_counter >= d_preamble_len) {
+                    d_state = NETID; // Transition to NETID
+                    d_preamble_counter = 0;
                     if (d_debug) {
-                        std::cerr << "[ERROR] Invalid chirp size: " << data_chirp.size() 
-                                  << " (expected " << d_chirp_len << ")" << std::endl;
+                        std::cout << "[STATE] PREAMBLE (" << d_preamble_len << "/" << d_preamble_len << ") -> NETID" << std::endl;
                     }
-                    return 0;
                 }
-                std::memcpy(out + produced, data_chirp.data(), d_chirp_len * sizeof(std::complex<float>));
+            }
+            break;
+
+            case NETID: {
+                if ((items_to_produce - produced) < d_chirp_len * 2) {
+                    if (d_debug) {
+                        std::cout << "[NETID] Insufficient space for 2 chirp (needs " 
+                                << d_chirp_len * 2 << ", available " << (items_to_produce-produced) 
+                                << ")" << std::endl;
+                    }
+                    goto complete_produce;
+                }
+
+                if (d_debug) {
+                    std::cout << "  [NETID] Adding NetID chirps (24 & 32)" << std::endl;
+                }
+
+                // Add NetID
+                std::vector<std::complex<float>> netid1_chirp = generate_lora_chirp(true, d_sf, d_bw, d_fs, 24, d_cfo);
+                std::vector<std::complex<float>> netid2_chirp = generate_lora_chirp(true, d_sf, d_bw, d_fs, 32, d_cfo);
+                std::memcpy(out + produced, netid1_chirp.data(), d_chirp_len * sizeof(std::complex<float>));
                 produced += d_chirp_len;
-            }
-            d_pdu_offset += chunk_size;
-        } 
-        else if (remaining_pdu > 0 || !d_pdu_queue.empty()) {
-            if (d_debug) {
-                std::cout << "[WAIT] PDU data available (remaining=" << remaining_pdu 
-                          << ", queue=" << d_pdu_queue.size() 
-                          << ") but no space for full chirp" << std::endl;
+                std::memcpy(out + produced, netid2_chirp.data(), d_chirp_len * sizeof(std::complex<float>));
+                produced += d_chirp_len;
+
+                d_state = SFD; // Transition to SFD
             }
             break;
-        } 
-        else if (!d_current_pdu.empty()) {
-            // Re check the suffix adding, this type will not occur.
-            if (d_debug) {
-                std::cout << "[WAIT] PDU end chirp need " << d_chirp_len 
-                          << " samples to insert. (no PDU data in queue)" << std::endl;
+            case SFD: {
+                if ((items_to_produce - produced) < d_chirp_len * 2.25) {
+                    if (d_debug) {
+                        std::cout << "[NETID] Insufficient space for 2.25 chirp (needs " 
+                                << d_chirp_len * 2.25 << ", available " << (items_to_produce-produced) 
+                                << ")" << std::endl;
+                    }
+                    goto complete_produce;
+                }
+                if (d_debug) {
+                    std::cout << "  [SFD] Adding SFD (2 downchirps + partial)" << std::endl;
+                }
+                // Add SFD
+                std::memcpy(out + produced, d_downchirp.data(), d_chirp_len * sizeof(std::complex<float>));
+                produced += d_chirp_len;
+                std::memcpy(out + produced, d_downchirp.data(), d_chirp_len * sizeof(std::complex<float>));
+                produced += d_chirp_len;
+                std::memcpy(out + produced, d_downchirp.data(), d_sfd_len * sizeof(std::complex<float>));
+                produced += d_sfd_len;
+
+                d_state = PAYLOAD;
             }
             break;
-        }
-        else {
-            int padding_size = (items_to_produce - produced);
-            if (d_debug) {
-                std::cout << "[PADDING] Inserting " << padding_size 
-                          << " zero samples (no PDU data)" << std::endl;
-            }
             
-            for (int i = 0; i < padding_size; i++) {
-                out[produced + i] = static_cast<uint8_t>(0);
+            case PAYLOAD: {
+                // Data processing
+                int remaining_request = (items_to_produce - produced) / d_chirp_len;
+                int remaining_pdu = d_current_pdu.empty() ? 0 : (d_current_pdu.size() - d_pdu_offset);
+                int chunk_size = std::min(remaining_request, remaining_pdu);
+
+                if (d_debug) {
+                    std::cout << "[DATA] remaining_request=" << remaining_request 
+                            << ", remaining_pdu=" << remaining_pdu 
+                            << ", chunk_size=" << chunk_size << std::endl;
+                }
+
+                if (chunk_size > 0) {
+                    if (d_debug) {
+                        std::cout << "  [PROCESSING] Writing " << chunk_size << " data symbols (offset=" 
+                                << d_pdu_offset << ")" << std::endl;
+                    }
+                    
+                    for (int i = 0; i < chunk_size; ++i) {
+                        double symbol = float(d_current_pdu[d_pdu_offset + i]);
+                        if (d_debug) {
+                            std::cout << "    [SYMBOL " << i << "] value=" << symbol;
+                            if (i == 0) std::cout << " (first)";
+                            if (i == chunk_size-1) std::cout << " (last)";
+                            std::cout << std::endl;
+                        }
+                        
+                        std::vector<std::complex<float>> data_chirp = generate_lora_chirp(true, d_sf, d_bw, d_fs, symbol, d_cfo);
+                        if (data_chirp.size() != d_chirp_len) {
+                            if (d_debug) {
+                                std::cerr << "[ERROR] Invalid chirp size: " << data_chirp.size() 
+                                        << " (expected " << d_chirp_len << ")" << std::endl;
+                            }
+                            return 0;
+                        }
+                        std::memcpy(out + produced, data_chirp.data(), d_chirp_len * sizeof(std::complex<float>));
+                        produced += d_chirp_len;
+                    }
+                    d_pdu_offset += chunk_size;
+                } 
+                else if (remaining_pdu > 0 || !d_pdu_queue.empty()) {
+                    if (d_debug) {
+                        std::cout << "[WAIT] PDU data available (remaining=" << remaining_pdu 
+                                << ", queue=" << d_pdu_queue.size() 
+                                << ") but no space for full chirp" << std::endl;
+                    }
+                    goto complete_produce;
+                } 
+                else {
+                    d_state = SUFFIX; // Transition to SUFFIX
+                }
             }
-            produced += padding_size;
+            break;
+
+            case SUFFIX: {
+                if ((items_to_produce - produced) < d_chirp_len) {
+                    if (d_debug) {
+                        std::cout << "[SUFFIX LEN] Insufficient space for single chirp (needs " 
+                                << d_chirp_len << ", available " << (items_to_produce-produced) 
+                                << ")" << std::endl;
+                    }
+                    break;
+                }
+
+                // Add an end down chirp
+                std::memcpy(out + produced, d_downchirp.data(), d_chirp_len * sizeof(std::complex<float>));
+                produced += d_chirp_len;
+
+                // Check PDU completion
+                if (!d_current_pdu.empty() && d_pdu_offset >= d_current_pdu.size()) {
+                    if (d_debug) {
+                        std::cout << "[PDU COMPLETE] Processed PDU (size=" 
+                                << d_current_pdu.size() << "), offset=" << d_pdu_offset << std::endl;
+                    }
+                    d_current_pdu.clear();
+                    d_pdu_offset = 0;
+                } else {
+                    std::cerr << "[SUFFIX] PDU not complete !!!" << std::endl;
+                }
+
+                d_state = IDLE;
+            }
+            break;
+
+            default:
+                // Should not happen
+                std::cerr << "[ERROR] css_modulate_impl in unknown state: " << d_state << std::endl;
+                d_state = IDLE; // Reset to a known state
+                break; // Exit switch
         }
-    }
+
+        
+    } // end while
+
+    complete_produce:;
 
     // Temporary save unused target_items
     if (produced < target_items) {

@@ -61,6 +61,20 @@ private:
     std::vector<std::complex<float>> d_upchirp;
     std::vector<std::complex<float>> d_downchirp;
 
+    // State control
+    enum State {
+        IDLE,           // Waiting for a PDU
+        PREAMBLE,       // Sending preamble upchirps
+        NETID,          // Sending NetID chirps
+        SFD,            // Sending SFD downchirps and partial
+        PAYLOAD,        // Sending payload data chirps
+        SUFFIX          // Sending the final downchirp
+    };
+    int d_preamble_counter;                     // Number of preamble chirps sent
+    int d_netid_counter;                        // Which NetID chirp is being sent (0 or 1)
+    int d_sfd_counter;                          // Which SFD segment is being sent (0, 1, or partial)
+    State d_state;
+
 public:
     css_modulate_impl(int sf, double bw, double fs, int cr, int preamble_len, double cfo);
     ~css_modulate_impl();
