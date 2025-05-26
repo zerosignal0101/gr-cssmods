@@ -157,7 +157,7 @@ std::vector<uint16_t> css_symbols_decode_impl::diag_deinterleave_impl(
 
     // 1. de2bi equivalent: Convert symbols to binary matrix `b_matrix` (N x ppm)
     // Each inner vector is a row representing a symbol's bits (MSB first)
-    std::vector<std::vector<int>> b_matrix(num_input_symbols, std::vector<int>(ppm));
+    std::vector<std::vector<uint16_t>> b_matrix(num_input_symbols, std::vector<uint16_t>(ppm));
     for (size_t i = 0; i < num_input_symbols; ++i) {
         uint16_t current_symbol = symbols[i];
         for (int j = ppm - 1; j >= 0; --j) {
@@ -166,17 +166,19 @@ std::vector<uint16_t> css_symbols_decode_impl::diag_deinterleave_impl(
     }
 
     // For debugging: Print b_matrix
-    // std::cout << "b_matrix (N x ppm):" << std::endl;
-    // for (size_t i = 0; i < num_input_symbols; ++i) {
-    //     std::cout << "  ";
-    //     for (int j = 0; j < ppm; ++j) {
-    //         std::cout << b_matrix[i][j] << " ";
-    //     }
-    //     std::cout << std::endl;
-    // }
+    if (d_debug) {
+        std::cout << "b_matrix (N x ppm):" << std::endl;
+        for (size_t i = 0; i < num_input_symbols; ++i) {
+            std::cout << "  ";
+            for (int j = 0; j < ppm; ++j) {
+                std::cout << b_matrix[i][j] << " ";
+            }
+            std::cout << std::endl;
+        }
+    }
 
     // 2. circshift equivalent and cell2mat: Create `shifted_b_matrix` (N x ppm)
-    std::vector<std::vector<int>> shifted_b_matrix(num_input_symbols, std::vector<int>(ppm));
+    std::vector<std::vector<uint16_t>> shifted_b_matrix(num_input_symbols, std::vector<uint16_t>(ppm));
     for (size_t i = 0; i < num_input_symbols; ++i) {
         // MATLAB x is 1-indexed, so x = i + 1
         // Shift amount is 1 - x = 1 - (i + 1) = -i
@@ -204,17 +206,19 @@ std::vector<uint16_t> css_symbols_decode_impl::diag_deinterleave_impl(
     }
 
     // For debugging: Print shifted_b_matrix
-    // std::cout << "shifted_b_matrix (N x ppm):" << std::endl;
-    // for (size_t i = 0; i < num_input_symbols; ++i) {
-    //     std::cout << "  ";
-    //     for (int j = 0; j < ppm; ++j) {
-    //         std::cout << shifted_b_matrix[i][j] << " ";
-    //     }
-    //     std::cout << std::endl;
-    // }
+    if (d_debug) {
+        std::cout << "shifted_b_matrix (N x ppm):" << std::endl;
+        for (size_t i = 0; i < num_input_symbols; ++i) {
+            std::cout << "  ";
+            for (int j = 0; j < ppm; ++j) {
+                std::cout << shifted_b_matrix[i][j] << " ";
+            }
+            std::cout << std::endl;
+        }
+    }
 
     // 3. Transpose: Create `transposed_matrix` (ppm x N)
-    std::vector<std::vector<int>> transposed_matrix(ppm, std::vector<int>(num_input_symbols));
+    std::vector<std::vector<uint16_t>> transposed_matrix(ppm, std::vector<uint16_t>(num_input_symbols));
     for (int i = 0; i < ppm; ++i) { // iterating rows of transposed matrix (0 to ppm-1)
         for (size_t j = 0; j < num_input_symbols; ++j) { // iterating columns of transposed matrix (0 to N-1)
             transposed_matrix[i][j] = shifted_b_matrix[j][i];
@@ -222,14 +226,16 @@ std::vector<uint16_t> css_symbols_decode_impl::diag_deinterleave_impl(
     }
 
     // For debugging: Print transposed_matrix
-    // std::cout << "transposed_matrix (ppm x N):" << std::endl;
-    // for (int i = 0; i < ppm; ++i) {
-    //     std::cout << "  ";
-    //     for (size_t j = 0; j < num_input_symbols; ++j) {
-    //         std::cout << transposed_matrix[i][j] << " ";
-    //     }
-    //     std::cout << std::endl;
-    // }
+    if (d_debug) {
+        std::cout << "transposed_matrix (ppm x N):" << std::endl;
+        for (int i = 0; i < ppm; ++i) {
+            std::cout << "  ";
+            for (size_t j = 0; j < num_input_symbols; ++j) {
+                std::cout << transposed_matrix[i][j] << " ";
+            }
+            std::cout << std::endl;
+        }
+    }
 
     // 4. bi2de equivalent: Convert rows of `transposed_matrix` to decimal
     // The output will have `ppm` elements.
@@ -238,7 +244,7 @@ std::vector<uint16_t> css_symbols_decode_impl::diag_deinterleave_impl(
         uint16_t decimal_value = 0;
         for (size_t j = 0; j < num_input_symbols; ++j) { // For each bit in that row
             // MSB is at index 0 (leftmost)
-            decimal_value = (decimal_value << 1) | transposed_matrix[i][j];
+            decimal_value = (decimal_value << 1) | transposed_matrix[i][num_input_symbols - j - 1];
         }
         codewords_intermediate[i] = decimal_value;
     }
