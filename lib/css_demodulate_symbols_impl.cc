@@ -264,11 +264,11 @@ int css_demodulate_symbols_impl::general_work(int noutput_items,
     // Calculate the absolute index of the last item in the current input buffer
     int64_t abs_end_pos = abs_read_pos + ninput_items[0];
 
-    if (d_debug) {
-        fprintf(stderr, "css_frame_sync_impl::work: Processing %d items. Absolute range [%ld, %ld).\n",
-                noutput_items, abs_read_pos, abs_end_pos);
-        fprintf(stderr, "  Current state: %d, Search position: %ld\n", d_state, d_current_search_pos);
-    }
+    // if (d_debug) {
+    //     fprintf(stderr, "css_frame_sync_impl::work: Processing %d items. Absolute range [%ld, %ld).\n",
+    //             noutput_items, abs_read_pos, abs_end_pos);
+    //     fprintf(stderr, "  Current state: %d, Search position: %ld\n", d_state, d_current_search_pos);
+    // }
 
     // Process data based on the current state
     // Stay in the loop as long as we are actively syncing AND have enough data
@@ -295,27 +295,27 @@ int css_demodulate_symbols_impl::general_work(int noutput_items,
                     // Re-check if enough data from the new start pos
                     if (d_current_search_pos + d_sample_num > abs_end_pos) {
                         // Not enough data even from the buffer start, break search loop
-                        if (d_debug) {
-                        fprintf(stderr, "css_frame_sync_impl::work: State SEARCHING_PREAMBLE. Not enough data (%ld < %d) even from buffer start %ld. Waiting for more data.\n",
-                                abs_end_pos - d_current_search_pos, d_sample_num, d_current_search_pos);
-                        }
+                        // if (d_debug) {
+                        // fprintf(stderr, "css_frame_sync_impl::work: State SEARCHING_PREAMBLE. Not enough data (%ld < %d) even from buffer start %ld. Waiting for more data.\n",
+                        //         abs_end_pos - d_current_search_pos, d_sample_num, d_current_search_pos);
+                        // }
                         break; // Exit while loop, return noutput_items
                     }
 
                     std::pair<float, int> up_peak = dechirp(in, current_symbol_start_in_buffer, true, d_sample_num, d_fft, d_fft_len, d_bin_num, d_upchirp, d_downchirp);
 
-                    if (d_debug) {
-                        fprintf(stderr, "css_frame_sync_impl::work: State SEARCHING_PREAMBLE. Checking abs_pos %ld (buffer_offset %ld). Up peak: (mag=%.2f, bin=%d).\n",
-                                d_current_search_pos, current_symbol_start_in_buffer, up_peak.first, up_peak.second);
-                    }
+                    // if (d_debug) {
+                    //     fprintf(stderr, "css_frame_sync_impl::work: State SEARCHING_PREAMBLE. Checking abs_pos %ld (buffer_offset %ld). Up peak: (mag=%.2f, bin=%d).\n",
+                    //             d_current_search_pos, current_symbol_start_in_buffer, up_peak.first, up_peak.second);
+                    // }
 
                     // Check for upchirp detection
                     if (up_peak.first < 100.0) {
-                        if (d_debug) {
-                            std::cout << "css_frame_sync_impl::work: State SEARCHING_PREAMBLE. "
-                                    << "Invalid upchirp detected with peak value " << up_peak.first 
-                                    << " (below threshold 100.0)" << std::endl;
-                        }
+                        // if (d_debug) {
+                        //     std::cout << "css_frame_sync_impl::work: State SEARCHING_PREAMBLE. "
+                        //             << "Invalid upchirp detected with peak value " << up_peak.first 
+                        //             << " (below threshold 100.0)" << std::endl;
+                        // }
                         // Invalid symbol
                     }
                     else if (d_preamble_bin == -1) {
@@ -447,10 +447,10 @@ int css_demodulate_symbols_impl::general_work(int noutput_items,
                 // If the loop finished without finding a downchirp, it means we ran out of data
                 // in the current buffer chunk. d_current_search_pos is already updated
                 // to the start of the next symbol to check in the *next* work call.
-                if (d_debug) {
-                     fprintf(stderr, "css_frame_sync_impl::work: State SEARCHING_PREAMBLE. Ran out of data in buffer [%ld, %ld) before finding downchirp. Next search starts at %ld. Waiting for more data.\n",
-                             abs_read_pos, abs_end_pos, d_current_search_pos);
-                }
+                // if (d_debug) {
+                //      fprintf(stderr, "css_frame_sync_impl::work: State SEARCHING_PREAMBLE. Ran out of data in buffer [%ld, %ld) before finding downchirp. Next search starts at %ld. Waiting for more data.\n",
+                //              abs_read_pos, abs_end_pos, d_current_search_pos);
+                // }
                 consume_each(ninput_items[0]);
                 return noutput_items; // Consume all input, state and search pos are saved
             end_search_preamble:;
@@ -501,10 +501,10 @@ int css_demodulate_symbols_impl::general_work(int noutput_items,
                 // If the loop finished without finding a downchirp, it means we ran out of data
                 // in the current buffer chunk. d_current_search_pos is already updated
                 // to the start of the next symbol to check in the *next* work call.
-                if (d_debug) {
-                     fprintf(stderr, "css_frame_sync_impl::work: State SEARCHING_DOWNCHIRP. Ran out of data in buffer [%ld, %ld) before finding downchirp. Next search starts at %ld. Waiting for more data.\n",
-                             abs_read_pos, abs_end_pos, d_current_search_pos);
-                }
+                // if (d_debug) {
+                //      fprintf(stderr, "css_frame_sync_impl::work: State SEARCHING_DOWNCHIRP. Ran out of data in buffer [%ld, %ld) before finding downchirp. Next search starts at %ld. Waiting for more data.\n",
+                //              abs_read_pos, abs_end_pos, d_current_search_pos);
+                // }
                 consume_each(ninput_items[0]);
                 return noutput_items; // Consume all input, state and search pos are saved
             next_state_processing:; // Label to jump to if state changes
@@ -678,10 +678,10 @@ int css_demodulate_symbols_impl::general_work(int noutput_items,
                     // Re-check if enough data from the new start pos
                     if (d_current_search_pos + d_sample_num > abs_end_pos) {
                         // Not enough data even from the buffer start, break search loop
-                        if (d_debug) {
-                        fprintf(stderr, "css_frame_sync_impl::work: State STATE_SYNC_COMPLETE. Not enough data (%ld < %d) even from buffer start %ld. Waiting for more data.\n",
-                                abs_end_pos - d_current_search_pos, d_sample_num, d_current_search_pos);
-                        }
+                        // if (d_debug) {
+                        // fprintf(stderr, "css_frame_sync_impl::work: State STATE_SYNC_COMPLETE. Not enough data (%ld < %d) even from buffer start %ld. Waiting for more data.\n",
+                        //         abs_end_pos - d_current_search_pos, d_sample_num, d_current_search_pos);
+                        // }
                         break; // Exit while loop, return noutput_items
                     }
 
@@ -689,10 +689,10 @@ int css_demodulate_symbols_impl::general_work(int noutput_items,
                     std::pair<float, int> up_peak = dechirp(in, current_symbol_start_in_buffer, true, d_sample_num, d_fft, d_fft_len, d_bin_num, d_upchirp, d_downchirp);
                     std::pair<float, int> down_peak = dechirp(in, current_symbol_start_in_buffer, false, d_sample_num, d_fft, d_fft_len, d_bin_num, d_upchirp, d_downchirp);
 
-                    if (d_debug) {
-                        fprintf(stderr, "css_frame_sync_impl::work: State STATE_SYNC_COMPLETE. Checking abs_pos %ld (buffer_offset %ld). Up peak: (mag=%.2f, bin=%d), Down peak: (mag=%.2f, bin=%d).\n",
-                                d_current_search_pos, current_symbol_start_in_buffer, up_peak.first, up_peak.second, down_peak.first, down_peak.second);
-                    }
+                    // if (d_debug) {
+                    //     fprintf(stderr, "css_frame_sync_impl::work: State STATE_SYNC_COMPLETE. Checking abs_pos %ld (buffer_offset %ld). Up peak: (mag=%.2f, bin=%d), Down peak: (mag=%.2f, bin=%d).\n",
+                    //             d_current_search_pos, current_symbol_start_in_buffer, up_peak.first, up_peak.second, down_peak.first, down_peak.second);
+                    // }
 
                     // Move to the next symbol position to search
                     d_current_search_pos += d_sample_num;
@@ -701,10 +701,10 @@ int css_demodulate_symbols_impl::general_work(int noutput_items,
                     // Check for upchirp detection (simple magnitude comparison)
                     if (std::abs(up_peak.first) > std::abs(down_peak.first)) {
                         symbol_value = (int(round((up_peak.second + d_bin_num - d_preamble_bin) / (double)d_zero_padding_ratio))) % (1 << d_sf);
-                        if (d_debug) {
-                            fprintf(stderr, "css_frame_sync_impl::work: State STATE_SYNC_COMPLETE. Get symbol: %d\n",
-                                    symbol_value);
-                        }
+                        // if (d_debug) {
+                        //     fprintf(stderr, "css_frame_sync_impl::work: State STATE_SYNC_COMPLETE. Get symbol: %d\n",
+                        //             symbol_value);
+                        // }
                         d_final_symbols.push_back(symbol_value);
                     }
                     else {
@@ -720,10 +720,10 @@ int css_demodulate_symbols_impl::general_work(int noutput_items,
                 // If the loop finished without finding a downchirp, it means we ran out of data
                 // in the current buffer chunk. d_current_search_pos is already updated
                 // to the start of the next symbol to check in the *next* work call.
-                if (d_debug) {
-                    fprintf(stderr, "css_frame_sync_impl::work: State STATE_SYNC_COMPLETE. Ran out of data in buffer [%ld, %ld) before finding downchirp. Next search starts at %ld. Waiting for more data.\n",
-                            abs_read_pos, abs_end_pos, d_current_search_pos);
-                }
+                // if (d_debug) {
+                //     fprintf(stderr, "css_frame_sync_impl::work: State STATE_SYNC_COMPLETE. Ran out of data in buffer [%ld, %ld) before finding downchirp. Next search starts at %ld. Waiting for more data.\n",
+                //             abs_read_pos, abs_end_pos, d_current_search_pos);
+                // }
                 consume_each(ninput_items[0]);
                 return noutput_items; // Consume all input, state and search pos are saved
             finish_symbol_processing:;

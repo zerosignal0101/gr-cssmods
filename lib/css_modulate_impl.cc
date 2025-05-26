@@ -184,7 +184,7 @@ css_modulate_impl::css_modulate_impl(
  */
 
 void css_modulate_impl::handle_pdu(pmt::pmt_t msg) {
-    gr::thread::scoped_lock guard(d_mutex);
+    // gr::thread::scoped_lock guard(d_mutex);
     
     // Check if this is a valid PDU
     if (!pmt::is_pair(msg)) {
@@ -239,7 +239,7 @@ int css_modulate_impl::general_work(int noutput_items,
                   << ", input_items.size()=" << input_items.size() << std::endl;
     }
 
-    gr::thread::scoped_lock guard(d_mutex);
+    // gr::thread::scoped_lock guard(d_mutex);
     std::complex<float>* out = reinterpret_cast<std::complex<float>*>(output_items[0]);
     
     // Timing calculation
