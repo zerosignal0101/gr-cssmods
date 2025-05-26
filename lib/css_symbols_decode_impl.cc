@@ -74,7 +74,7 @@ css_symbols_decode_impl::css_symbols_decode_impl(int sf, int cr, bool ldr)
     d_sf(sf),
     d_cr(cr),
     d_ldr(ldr),
-    d_debug(true)
+    d_debug(false)
 {
     // Validate parameters
     if (d_sf < 7 || d_sf > 12) {
@@ -400,6 +400,15 @@ void css_symbols_decode_impl::dewhiten_impl(
     const std::vector<uint8_t>& bytes_in, std::vector<uint8_t>& bytes_w_out)
 {
     bytes_w_out.resize(bytes_in.size());
+    size_t plen = bytes_in.size();
+    if (plen > d_whitening_seq.size()) {
+        // Whitening sequence is too short for this payload length
+        std::cerr << "css_symbols: Whitening sequence too short for payload length "
+                  << plen << std::endl;
+        // Handle error - maybe regenerate a longer sequence or throw
+        // For simplicity, let's resize the sequence (inefficient if done often)
+        d_whitening_seq = generate_whitening_seq(plen);
+    }
     if (d_whitening_seq.empty()) {
         std::cerr << "Dewhitening called with empty whitening sequence. Output will be same as input." << std::endl;
         bytes_w_out = bytes_in;

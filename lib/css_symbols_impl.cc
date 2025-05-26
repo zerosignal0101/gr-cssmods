@@ -13,6 +13,32 @@
 namespace gr {
 namespace cssmods {
 
+// LFSR Whitening sequence generation (x^7 + x^5 + 1, seed 1)
+std::vector<uint8_t> generate_whitening_seq(size_t max_len_bytes)
+{
+    std::vector<uint8_t> seq(max_len_bytes, 0);
+    uint8_t state = 0x01; // Initial state (seed) 0000001
+    for (size_t i = 0; i < max_len_bytes; ++i) {
+        uint8_t byte = 0;
+        for (int j = 0; j < 8; ++j) {
+            // Get the next bit from the LFSR state (LSB is state & 1)
+            // Polynomial x^7 + x^5 + 1 (bits 6, 4, 0)
+            uint8_t next_bit = ((state >> 6) ^ (state >> 4) ^ (state >> 0)) & 1;
+            // Shift state right and insert the new bit into MSB
+            state = (state >> 1) | (next_bit << 7);
+            // Store the generated bit into the current byte (MSB first to match Matlab
+            // bit order assumption in de2bi/bi2de?) The Matlab code's de2bi(...,
+            // 'right-msb') means LSB is bit 0. bi2de(..., 'right-msb') means bit 0 is
+            // LSB. Let's generate bits and put into the byte LSB first to match standard
+            // byte representation and how de2bi/bi2de work.
+            byte |= ((state & 1)
+                     << j); // Take LSB of new state, put it into bit j of the byte
+        }
+        seq[i] = byte;
+    }
+    return seq;
+}
+
 css_symbols::sptr css_symbols::make(int sf, int cr, bool ldr)
 {
     return gnuradio::make_block_sptr<css_symbols_impl>(sf, cr, ldr);
@@ -70,32 +96,6 @@ css_symbols_impl::css_symbols_impl(int sf, int cr, bool ldr)
 }
 
 
-// LFSR Whitening sequence generation (x^7 + x^5 + 1, seed 1)
-std::vector<uint8_t> css_symbols_impl::generate_whitening_seq(size_t max_len_bytes)
-{
-    std::vector<uint8_t> seq(max_len_bytes, 0);
-    uint8_t state = 0x01; // Initial state (seed) 0000001
-    for (size_t i = 0; i < max_len_bytes; ++i) {
-        uint8_t byte = 0;
-        for (int j = 0; j < 8; ++j) {
-            // Get the next bit from the LFSR state (LSB is state & 1)
-            // Polynomial x^7 + x^5 + 1 (bits 6, 4, 0)
-            uint8_t next_bit = ((state >> 6) ^ (state >> 4) ^ (state >> 0)) & 1;
-            // Shift state right and insert the new bit into MSB
-            state = (state >> 1) | (next_bit << 7);
-            // Store the generated bit into the current byte (MSB first to match Matlab
-            // bit order assumption in de2bi/bi2de?) The Matlab code's de2bi(...,
-            // 'right-msb') means LSB is bit 0. bi2de(..., 'right-msb') means bit 0 is
-            // LSB. Let's generate bits and put into the byte LSB first to match standard
-            // byte representation and how de2bi/bi2de work.
-            byte |= ((state & 1)
-                     << j); // Take LSB of new state, put it into bit j of the byte
-        }
-        seq[i] = byte;
-    }
-    return seq;
-}
-
 int css_symbols_impl::calc_sym_num(size_t plen)
 {
     // Number of payload symbol groups (blocks for interleaving)
@@ -104,13 +104,10 @@ int css_symbols_impl::calc_sym_num(size_t plen)
         throw std::runtime_error("Invalid LoRa parameters");
     }
     
-    // Equivalent to Matlab's (2*plen - sf + 7 + 4*crc - 5*(1-has_header))
-    // Assuming no header (has_header=false) and no crc (crc=0) for this version
-    double numerator = 2.0 * plen - d_sf + 7 + 0 - 5*(1-0); 
-    
+    double numerator = 2.0 * plen; 
     int num_payload_symbol_groups = std::ceil(numerator / ppm);
-    int total_symbols = 8 + std::max(num_payload_symbol_groups * (d_cr + 4), 0);
-    
+    int total_symbols = std::max(num_payload_symbol_groups * (d_cr + 4), 0);
+
     return total_symbols;
 }
 
@@ -288,11 +285,11 @@ void css_symbols_impl::handle_payload_message(pmt::pmt_t msg)
     // --- Start of Encoding Logic (ported from Matlab encode function) ---
     // 1. Calculate total symbols and needed nibbles
     int sym_num = calc_sym_num(plen);
+
     // Based on the Matlab formula: nibble_num = sf - 2 + (sym_num-8)/(cr+4)*(sf-2*ldr)
     // Derived number of payload symbol groups: (sym_num - 8) / (d_cr + 4)
-    int num_payload_symbol_groups = (sym_num > 8) ? (sym_num - 8) / (d_cr + 4) : 0;
     int ppm = d_sf - (d_ldr ? 2 : 0); // sf - 2*ldr
-    int nibble_num = (d_sf - 2) + num_payload_symbol_groups * ppm;
+    int nibble_num = sym_num*ppm/(d_cr + 4);
     // 2. Padding
     size_t bytes_needed = (nibble_num + 1) / 2; // ceil(nibble_num / 2.0)
     std::vector<uint8_t> data_w = payload;

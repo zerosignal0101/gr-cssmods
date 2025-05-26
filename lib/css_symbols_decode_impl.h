@@ -9,6 +9,7 @@
 #define INCLUDED_CSSMODS_CSS_SYMBOLS_DECODE_IMPL_H
 
 #include <gnuradio/cssmods/css_symbols_decode.h>
+#include "css_symbols_impl.h"
 
 namespace gr {
 namespace cssmods {

@@ -13,6 +13,9 @@
 namespace gr {
 namespace cssmods {
 
+// Helper function to generate whitening sequence (using x^7 + x^5 + 1, seed 1)
+std::vector<uint8_t> generate_whitening_seq(size_t max_len);
+
 /*!
  * \brief LoRa Physical Layer Symbol Encoding
  * \ingroup lora
@@ -32,8 +35,6 @@ private:
     int d_cr; // Code Rate (1-4, corresponds to 4/5 to 4/8)
     bool d_ldr; // Low Data Rate Optimization flag
     std::vector<uint8_t> d_whitening_seq; // Pre-computed whitening sequence
-    // Helper function to generate whitening sequence (using x^7 + x^5 + 1, seed 1)
-    std::vector<uint8_t> generate_whitening_seq(size_t max_len);
     // Helper function to calculate total symbols based on payload length and params
     int calc_sym_num(size_t plen);
     // Helper function for diagonal interleaving
