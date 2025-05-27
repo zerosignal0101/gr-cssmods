@@ -177,6 +177,10 @@ css_modulate_impl::css_modulate_impl(
     }
     d_upchirp = uc;
     d_downchirp = dc;
+    // d_chirp_cache
+    for(int i=0; i<std::pow(2,d_sf); i++) {
+        d_chirp_cache.push_back(generate_lora_chirp(true, d_sf, d_bw, d_fs, i, d_cfo));
+    }
 }
 
 /*
@@ -250,6 +254,8 @@ int css_modulate_impl::general_work(int noutput_items,
     // Clear temp target items
     d_target_items = 0;
 
+    int produced = 0;
+
     if (d_debug) {
         std::cout << "[TIMING] Elapsed=" << elapsed.count() << "us (" 
                   << elapsed_seconds << "s), target_items=" << target_items << std::endl;
@@ -260,7 +266,7 @@ int css_modulate_impl::general_work(int noutput_items,
         if (d_debug) {
             std::cout << "[EARLY EXIT] Not enough time elapsed (0 items to produce)" << std::endl;
         }
-        return 0;
+        goto complete_produce;
     }
 
     if (d_debug) {
@@ -268,7 +274,6 @@ int css_modulate_impl::general_work(int noutput_items,
                   << ", chirp_len=" << d_chirp_len << std::endl;
     }
 
-    int produced = 0;
     while (produced < items_to_produce) {
         switch (d_state) {
             case IDLE: {
@@ -342,8 +347,8 @@ int css_modulate_impl::general_work(int noutput_items,
                 }
 
                 // Add NetID
-                std::vector<std::complex<float>> netid1_chirp = generate_lora_chirp(true, d_sf, d_bw, d_fs, 24, d_cfo);
-                std::vector<std::complex<float>> netid2_chirp = generate_lora_chirp(true, d_sf, d_bw, d_fs, 32, d_cfo);
+                std::vector<std::complex<float>> netid1_chirp = d_chirp_cache[24];
+                std::vector<std::complex<float>> netid2_chirp = d_chirp_cache[32];
                 std::memcpy(out + produced, netid1_chirp.data(), d_chirp_len * sizeof(std::complex<float>));
                 produced += d_chirp_len;
                 std::memcpy(out + produced, netid2_chirp.data(), d_chirp_len * sizeof(std::complex<float>));
@@ -403,13 +408,13 @@ int css_modulate_impl::general_work(int noutput_items,
                             std::cout << std::endl;
                         }
                         
-                        std::vector<std::complex<float>> data_chirp = generate_lora_chirp(true, d_sf, d_bw, d_fs, symbol, d_cfo);
+                        std::vector<std::complex<float>> data_chirp = d_chirp_cache[size_t(round(symbol))];
                         if (data_chirp.size() != d_chirp_len) {
                             if (d_debug) {
                                 std::cerr << "[ERROR] Invalid chirp size: " << data_chirp.size() 
                                         << " (expected " << d_chirp_len << ")" << std::endl;
                             }
-                            return 0;
+                            goto complete_produce;
                         }
                         std::memcpy(out + produced, data_chirp.data(), d_chirp_len * sizeof(std::complex<float>));
                         produced += d_chirp_len;
@@ -490,6 +495,10 @@ int css_modulate_impl::general_work(int noutput_items,
             std::cerr << "[INFO] " << "Current PDU size: " << d_current_pdu.size() << std::endl;
             std::cerr << "[INFO] " << "Current produced: " << produced << std::endl;
             std::cerr << "[INFO] " << "Current noutputitem: " << noutput_items << std::endl;
+            auto end_processing_time = std::chrono::steady_clock::now();
+            auto processing_elapsed = std::chrono::duration_cast<std::chrono::microseconds>(end_processing_time - now);
+            std::cerr << "[INFO] " << "Processing takes (us): " << processing_elapsed.count() << std::endl;
+            std::cerr << "[INFO] " << "Last call time elapse (us): " << elapsed.count() << std::endl;
         }
     }
 

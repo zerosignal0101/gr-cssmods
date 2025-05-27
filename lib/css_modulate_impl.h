@@ -60,6 +60,7 @@ private:
     // Pre calculated chirp
     std::vector<std::complex<float>> d_upchirp;
     std::vector<std::complex<float>> d_downchirp;
+    std::vector<std::vector<std::complex<float>>> d_chirp_cache;
 
     // State control
     enum State {
